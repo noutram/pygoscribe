@@ -1,0 +1,18 @@
+[Desktop Entry]
+Name=Pygoscribe
+GenericName=Image Markup
+Comment=Mark up images from the clipboard or a file
+Exec=pygoscribe --window %F
+Icon=org.outram.Pygoscribe
+Terminal=false
+Type=Application
+Categories=Graphics;GTK;
+Keywords=annotate;screenshot;arrow;highlight;draw;crop;
+MimeType=image/png;image/jpeg;image/webp;image/gif;image/bmp;image/tiff;application/pdf;
+StartupNotify=true
+Actions=clipboard;
+X-Flatpak-RenamedFrom=org.outram.GtkMarkup.desktop;
+
+[Desktop Action clipboard]
+Name=Mark Up Clipboard
+Exec=pygoscribe --clipboard

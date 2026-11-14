@@ -1,0 +1,57 @@
+# SPDX-FileCopyrightText: 2026 Nicholas Outram
+# SPDX-License-Identifier: GPL-3.0-only
+
+[package]
+name = "pygoscribe"
+version = "0.1.17"
+description = "Mark up images from the clipboard or a file"
+edition = "2024"
+license = "GPL-3.0-only"
+authors = ["Nicholas Outram"]
+repository = "https://github.com/noutram/pygoscribe"
+# Never published to crates.io.
+publish = false
+
+[dependencies]
+adw = { version = "0.9", package = "libadwaita", features = ["v1_5"] }
+async-channel = "2"
+# The "pdf" feature adds cairo::PdfSurface for Save as PDF (gtk::cairo is the same crate).
+cairo-rs = { version = "0.22", features = ["pdf"] }
+gtk = { version = "0.11", package = "gtk4", features = ["v4_14"] }
+ksni = { version = "0.3", features = ["blocking"] }
+pangocairo = "0.22"
+poppler = { version = "0.26", package = "poppler-rs" }
+wayland-client = "0.31"
+wayland-scanner = "0.31"
+
+[build-dependencies]
+glib-build-tools = "0.22"
+
+[profile.release]
+strip = true
+
+# `cargo deb` (from `cargo install cargo-deb`) builds a .deb for Ubuntu.
+[package.metadata.deb]
+name = "pygoscribe"
+maintainer = "Nicholas Outram"
+copyright = "2026, Nicholas Outram"
+extended-description = "Lives in the top bar and opens the clipboard image or an image file for markup, then copies, saves or sends the result."
+section = "graphics"
+priority = "optional"
+depends = "$auto"
+# Portals back Open With… and Email…; the AppIndicator extension shows the top-bar icon.
+# The package name before 0.1.16: installing Pygoscribe removes it.
+conflicts = "gtkmarkup"
+replaces = "gtkmarkup"
+breaks = "gtkmarkup"
+recommends = "xdg-desktop-portal-gnome | xdg-desktop-portal-gtk, gnome-shell-extension-appindicator"
+assets = [
+    ["target/release/pygoscribe", "usr/bin/", "755"],
+    ["data/org.outram.Pygoscribe.desktop", "usr/share/applications/", "644"],
+    ["data/org.outram.Pygoscribe.metainfo.xml", "usr/share/metainfo/", "644"],
+    ["data/icons/hicolor/scalable/apps/org.outram.Pygoscribe.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
+    ["README.md", "usr/share/doc/pygoscribe/", "644"],
+    # DEP-5 copyright file; it replaces the one cargo-deb would generate.
+    ["debian/copyright", "usr/share/doc/pygoscribe/copyright", "644"],
+    ["THIRD-PARTY-LICENSES.md", "usr/share/doc/pygoscribe/", "644"],
+]

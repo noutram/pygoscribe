@@ -1,0 +1,130 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.outram.Pygoscribe</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-only</project_license>
+  <name>Pygoscribe</name>
+  <summary>Mark up images from the clipboard or a file</summary>
+  <description>
+    <p>
+      Pygoscribe lives in the top bar and opens the image on your clipboard, or an
+      image file, so you can draw on it, highlight, add arrows, shapes, speech
+      bubbles, text and a magnifying loupe, and crop it. Every mark stays
+      editable until you are done.
+    </p>
+    <p>
+      Copy the result back to the clipboard, save it as PNG or JPEG, open it
+      in another app or attach it to a new email.
+    </p>
+    <p>
+      Pygoscribe is free software under the GNU GPL version 3, provided as is,
+      without any warranty.
+    </p>
+  </description>
+  <developer id="org.outram">
+    <name>Nicholas Outram</name>
+  </developer>
+  <url type="homepage">https://github.com/noutram/pygoscribe</url>
+  <url type="vcs-browser">https://github.com/noutram/pygoscribe</url>
+  <url type="bugtracker">https://github.com/noutram/pygoscribe/issues</url>
+  <launchable type="desktop-id">org.outram.Pygoscribe.desktop</launchable>
+  <provides>
+    <binary>pygoscribe</binary>
+  </provides>
+  <replaces>
+    <id>org.outram.GtkMarkup</id>
+  </replaces>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.17" date="2026-11-14">
+      <description>
+        <p>Tidier documentation: the README and the app's description now describe Pygoscribe's tools on their own terms.</p>
+      </description>
+    </release>
+    <release version="0.1.16" date="2026-11-14">
+      <description>
+        <p>The app is now called Pygoscribe, after Pygoscelis, the Adélie penguin genus. The command is pygoscribe and the app ID is org.outram.Pygoscribe. Your settings and Start at Login carry over on first run, and installing the new .deb replaces the old package.</p>
+      </description>
+    </release>
+    <release version="0.1.15" date="2026-11-14">
+      <description>
+        <p>States plainly that Markup is free software provided as is, without any warranty: in the About window, in pygoscribe --version, in the README (with the GPL's disclaimer of warranty and limitation of liability) and in each source file.</p>
+      </description>
+    </release>
+    <release version="0.1.14" date="2026-11-14">
+      <description>
+        <p>Markup is now free software under the GNU General Public License, version 3 only (GPL-3.0-only). A new main menu in the header bar and an About item in the top-bar menu open the About window, which shows the license and the licenses of the libraries Markup uses. Each release now comes with its complete source code, including the Rust libraries and, for the Flatpak, Poppler.</p>
+      </description>
+    </release>
+    <release version="0.1.13" date="2026-11-13">
+      <description>
+        <p>Text in shapes and on lines: double-click a rectangle, oval, speech bubble, line or arrow (or select it and press Enter) to type text into it. Text in a shape can sit left, centre or right and top, middle or bottom (centred by default); text on a line or arrow sits above or below it, left, centre or right, and turns with the line. Alignment buttons are in the text editor and under Text Alignment in the right-click menu, which also lines up a text mark's lines left, centre or right.</p>
+      </description>
+    </release>
+    <release version="0.1.12" date="2026-11-13">
+      <description>
+        <p>Right-click menus: on a mark, Edit Text, Bring to Front, Send to Back and Delete; on the image, Copy, Mark Up Clipboard, Save, Save As, Scale Image to Visible Size and zoom. Long-press, Shift+F10 and the Menu key open them too. Bring to Front and Send to Back also have shortcuts, Ctrl+Shift+Up and Ctrl+Shift+Down. Hold Space and drag, or use the arrow keys, to move around a zoomed-in image without a middle mouse button.</p>
+      </description>
+    </release>
+    <release version="0.1.11" date="2026-11-13">
+      <description>
+        <p>Scale Image to Visible Size, in the zoom menu, resizes a picture and its marks to the size it is shown at. Save (Replace Original) writes the result back over the file you opened, in its own format, after asking. The header shows the image size.</p>
+      </description>
+    </release>
+    <release version="0.1.10" date="2026-11-13">
+      <description>
+        <p>Zoom images and PDF pages: Ctrl+plus and Ctrl+minus, Ctrl+0 to fit, Ctrl+1 for actual size, Ctrl+scroll or pinch, and zoom controls in the header bar. Zoomed-in PDF pages are redrawn sharply. Marks stay where they are, and saved results don't depend on the zoom.</p>
+      </description>
+    </release>
+    <release version="0.1.9" date="2026-11-12">
+      <description>
+        <p>Fix: Start at Login and Quit in the top-bar menu no longer leave a busy pointer spinning until GNOME times it out.</p>
+      </description>
+    </release>
+    <release version="0.1.8" date="2026-11-12">
+      <description>
+        <p>Open whole PDFs: a page sidebar (F9) shows every page, each page keeps its own marks and undo, and Save as PDF writes the whole document with text kept as text.</p>
+      </description>
+    </release>
+    <release version="0.1.7" date="2026-11-12">
+      <description>
+        <p>Open PDFs: pick a page of a multi-page PDF and mark it up. Save as PDF.</p>
+      </description>
+    </release>
+    <release version="0.1.6" date="2026-11-12">
+      <description>
+        <p>Choose the font of text marks, including bold and italic styles. The font is remembered between uses.</p>
+      </description>
+    </release>
+    <release version="0.1.5" date="2026-11-12">
+      <description>
+        <p>See-through colours: border and fill each have an opacity control, and rectangles, ovals and speech bubbles can turn their border off.</p>
+      </description>
+    </release>
+    <release version="0.1.4" date="2026-11-12">
+      <description>
+        <p>Rotate marks: hold Alt and drag a mark to turn it, adding Shift to snap to 15° steps.</p>
+      </description>
+    </release>
+    <release version="0.1.3" date="2026-11-12">
+      <description>
+        <p>Text marks are easier to edit: click one again with the Text tool, double-click it, or press Enter or F2. Text can span several lines (Shift+Enter), and Esc cancels an edit.</p>
+      </description>
+    </release>
+    <release version="0.1.2" date="2026-11-12">
+      <description>
+        <p>Changing the file type in the save dialog now changes the file name's extension to match.</p>
+      </description>
+    </release>
+    <release version="0.1.1" date="2026-11-11">
+      <description>
+        <p>Remembers colours, line width, text size, the last open and save folders, and the last save format. Save now has PNG and JPEG options, and choosing JPEG really saves a JPEG. Starting Markup from the app grid opens a window, so the launch spinner no longer keeps going. Windows opened from the top bar now get focus without a long busy pointer.</p>
+      </description>
+    </release>
+    <release version="0.1.0" date="2026-11-11">
+      <description>
+        <p>First packaged release, with start at login.</p>
+      </description>
+    </release>
+  </releases>
+</component>

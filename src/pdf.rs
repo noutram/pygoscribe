@@ -1,0 +1,334 @@
+// SPDX-FileCopyrightText: 2026 Nicholas Outram
+// SPDX-License-Identifier: GPL-3.0-only
+//
+// This program is free software: you can redistribute it and/or modify it
+// under the terms of the GNU General Public License version 3 as published by
+// the Free Software Foundation.
+//
+// This program is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU General Public License for more
+// details.
+
+//! Opening PDFs: a page is rendered with poppler into an image, which is then
+//! marked up like any other picture.
+
+use gtk::prelude::*;
+use gtk::{cairo, gdk, gio, glib};
+
+/// Pages are rendered at this many pixels per PDF point: 2 is 144 dpi, sharp
+/// enough to mark up and zoom into.
+pub const PIXELS_PER_POINT: f64 = 2.0;
+
+/// The longest side of a rendered page, in pixels, so huge pages (posters,
+/// drawings) don't need gigabytes of memory.
+const MAX_SIDE: f64 = 8192.0;
+
+/// Whether `file` is a PDF: by its name, or else by its first bytes.
+pub fn is_pdf(file: &gio::File) -> bool {
+    let named_pdf = file
+        .basename()
+        .and_then(|n| n.extension().map(|e| e.eq_ignore_ascii_case("pdf")))
+        .unwrap_or(false);
+    if named_pdf {
+        return true;
+    }
+    file.read(gio::Cancellable::NONE)
+        .and_then(|s| s.read_bytes(5, gio::Cancellable::NONE))
+        .is_ok_and(|b| b.as_ref() == b"%PDF-")
+}
+
+#[derive(Clone)]
+pub struct Pdf(poppler::Document);
+
+/// How a page maps to the image it is marked up on.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PageSize {
+    /// Image pixels per PDF point.
+    pub scale: f64,
+    /// The page's image size in pixels.
+    pub width: i32,
+    pub height: i32,
+}
+
+impl PageSize {
+    pub fn points_per_pixel(&self) -> f64 {
+        1.0 / self.scale
+    }
+}
+
+impl Pdf {
+    pub fn open(file: &gio::File) -> Result<Self, glib::Error> {
+        poppler::Document::from_gfile(file, None, gio::Cancellable::NONE).map(Self)
+    }
+
+    pub fn n_pages(&self) -> i32 {
+        self.0.n_pages()
+    }
+
+    fn page(&self, index: i32) -> Result<poppler::Page, String> {
+        (0..self.n_pages())
+            .contains(&index)
+            .then(|| self.0.page(index))
+            .flatten()
+            .ok_or_else(|| format!("The PDF has no page {}", index + 1))
+    }
+
+    /// The image size page `index` is rendered at, without rendering it.
+    pub fn page_size(&self, index: i32) -> Result<PageSize, String> {
+        let (pw, ph) = self.page(index)?.size();
+        if !(pw > 0.0 && ph > 0.0) {
+            return Err("The PDF page has no size".into());
+        }
+        let scale = PIXELS_PER_POINT.min(MAX_SIDE / pw.max(ph));
+        Ok(PageSize { scale, width: (pw * scale).ceil() as i32, height: (ph * scale).ceil() as i32 })
+    }
+
+    /// Draws page `index` with poppler in image-pixel coordinates (vector, no
+    /// background). Used for the sidebar, the loupe and Save as PDF.
+    pub fn painter(&self, index: i32) -> Result<impl Fn(&cairo::Context) + use<>, String> {
+        let page = self.page(index)?;
+        let scale = self.page_size(index)?.scale;
+        Ok(move |cr: &cairo::Context| {
+            let _ = cr.save();
+            cr.scale(scale, scale);
+            page.render(cr);
+            let _ = cr.restore();
+        })
+    }
+
+    /// Renders page `index` (from 0) on white. Returns the image and the PDF
+    /// points per image pixel, so saving as PDF can give the page its
+    /// original size.
+    pub fn render(&self, index: i32) -> Result<(gdk::Texture, f64), String> {
+        let size = self.page_size(index)?;
+        let paint = self.painter(index)?;
+        let err = |e: cairo::Error| e.to_string();
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, size.width, size.height).map_err(err)?;
+        {
+            let cr = cairo::Context::new(&surface).map_err(err)?;
+            cr.set_source_rgb(1.0, 1.0, 1.0);
+            cr.paint().map_err(err)?;
+            paint(&cr);
+            cr.status().map_err(err)?;
+        }
+        let texture = crate::render::texture_from_surface(surface).map_err(err)?;
+        Ok((texture, size.points_per_pixel()))
+    }
+
+    /// Saves every page with its marks (one `Document` per page, in image
+    /// pixels) as a new PDF. The pages are drawn by poppler straight into the
+    /// PDF, so their text and drawings stay vector; the marks are vector too.
+    /// A cropped page gets the size of its crop.
+    pub fn save_marked(&self, docs: &[Document], path: &std::path::Path) -> Result<(), String> {
+        if docs.len() != self.n_pages() as usize {
+            return Err("The page count changed".into());
+        }
+        let err = |e: cairo::Error| e.to_string();
+        let surface = cairo::PdfSurface::new(1.0, 1.0, path).map_err(err)?;
+        let cr = cairo::Context::new(&surface).map_err(err)?;
+        for (i, doc) in docs.iter().enumerate() {
+            let index = i as i32;
+            let size = self.page_size(index)?;
+            let paint = self.painter(index)?;
+            let r = doc.crop.unwrap_or(crate::document::Rect {
+                x: 0.0,
+                y: 0.0,
+                w: f64::from(size.width),
+                h: f64::from(size.height),
+            });
+            let ppp = size.points_per_pixel();
+            surface.set_size(r.w * ppp, r.h * ppp).map_err(err)?;
+            cr.save().map_err(err)?;
+            cr.scale(ppp, ppp);
+            cr.translate(-r.x, -r.y);
+            cr.rectangle(r.x, r.y, r.w, r.h);
+            cr.clip();
+            if doc.shapes.is_empty() {
+                paint(&cr);
+            } else {
+                // A group, so the highlighter's multiply only blends with the page.
+                cr.push_group();
+                crate::render::draw_page(&cr, &paint, doc);
+                cr.pop_group_to_source().map_err(err)?;
+                cr.paint().map_err(err)?;
+            }
+            cr.restore().map_err(err)?;
+            cr.show_page().map_err(err)?;
+        }
+        drop(cr);
+        surface.finish();
+        surface.status().map_err(err)
+    }
+}
+
+use crate::document::Document;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Writes a PDF with pages of the given sizes (in points).
+    fn make_pdf(path: &std::path::Path, sizes: &[(f64, f64)]) {
+        let surface = cairo::PdfSurface::new(sizes[0].0, sizes[0].1, path).unwrap();
+        let cr = cairo::Context::new(&surface).unwrap();
+        for (w, h) in sizes {
+            surface.set_size(*w, *h).unwrap();
+            cr.set_source_rgb(1.0, 0.0, 0.0);
+            cr.rectangle(0.0, 0.0, w / 2.0, h / 2.0);
+            cr.fill().unwrap();
+            cr.show_page().unwrap();
+        }
+        drop(cr);
+        surface.finish();
+    }
+
+    #[test]
+    fn opens_and_renders_pages() {
+        let dir = std::env::temp_dir().join(format!("pygoscribe-pdf-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("two pages.PDF");
+        make_pdf(&path, &[(100.0, 50.0), (200.0, 300.0)]);
+        let file = gio::File::for_path(&path);
+        assert!(is_pdf(&file));
+
+        let pdf = Pdf::open(&file).unwrap();
+        assert_eq!(pdf.n_pages(), 2);
+        let (tex, pt_per_px) = pdf.render(0).unwrap();
+        assert_eq!((tex.width(), tex.height()), (200, 100));
+        assert_eq!(pt_per_px, 0.5);
+        let (tex, _) = pdf.render(1).unwrap();
+        assert_eq!((tex.width(), tex.height()), (400, 600));
+        assert!(pdf.render(2).is_err());
+
+        // Top-left quarter is red, the rest white.
+        let mut dl = gdk::TextureDownloader::new(&tex);
+        dl.set_format(gdk::MemoryFormat::R8g8b8a8);
+        let (bytes, stride) = dl.download_bytes();
+        let px = |x: usize, y: usize| bytes[y * stride + x * 4..][..4].to_vec();
+        assert_eq!(px(10, 10), [255, 0, 0, 255]);
+        assert_eq!(px(390, 590), [255, 255, 255, 255]);
+
+        // A PDF without the extension is recognised by its contents.
+        let renamed = dir.join("no-extension");
+        std::fs::copy(&path, &renamed).unwrap();
+        assert!(is_pdf(&gio::File::for_path(&renamed)));
+        let png = dir.join("not.png");
+        std::fs::write(&png, b"\x89PNG....").unwrap();
+        assert!(!is_pdf(&gio::File::for_path(&png)));
+
+        // A broken PDF gives an error, not a crash.
+        let broken = dir.join("broken.pdf");
+        std::fs::write(&broken, b"%PDF-1.4 nonsense").unwrap();
+        assert!(Pdf::open(&gio::File::for_path(&broken)).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The whole path: open page 2 of a PDF, add a mark, export, save as PDF
+    /// and PNG, and read both back.
+    #[test]
+    fn marks_up_a_page_and_saves_pdf_and_png() {
+        use crate::document::{Document, Kind, Rgba, Shape, Style};
+        use crate::settings::SaveFormat;
+        let dir = std::env::temp_dir().join(format!("pygoscribe-pdf-e2e-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("letter.pdf");
+        make_pdf(&src, &[(612.0, 792.0), (300.0, 200.0), (612.0, 792.0)]);
+
+        let pdf = Pdf::open(&gio::File::for_path(&src)).unwrap();
+        let (tex, pt_per_px) = pdf.render(1).unwrap();
+        assert_eq!((tex.width(), tex.height()), (600, 400));
+
+        let image = crate::render::surface_from_texture(&tex).unwrap();
+        let style = Style { stroke: Rgba::new(0.0, 0.0, 1.0, 1.0), fill: None, width: 10.0, ..Style::default() };
+        let mut rect = Shape::new(Kind::Rect, (400.0, 250.0), style);
+        rect.b = (550.0, 350.0);
+        let doc = Document { shapes: vec![rect], crop: None, image: None };
+        let result = crate::render::export(&image, &doc).unwrap();
+
+        let out_pdf = dir.join("marked.pdf");
+        crate::output::save(&result, &out_pdf, SaveFormat::Pdf, pt_per_px).unwrap();
+        let out_png = dir.join("marked.png");
+        crate::output::save(&result, &out_png, SaveFormat::Png, pt_per_px).unwrap();
+
+        let back = Pdf::open(&gio::File::for_path(&out_pdf)).unwrap();
+        assert_eq!(back.n_pages(), 1);
+        let (page, _) = back.render(0).unwrap();
+        // Same page size as the original page 2.
+        assert_eq!((page.width(), page.height()), (600, 400));
+        let png = gdk::Texture::from_filename(&out_png).unwrap();
+        assert_eq!((png.width(), png.height()), (600, 400));
+
+        for t in [page, png] {
+            let mut dl = gdk::TextureDownloader::new(&t);
+            dl.set_format(gdk::MemoryFormat::R8g8b8a8);
+            let (bytes, stride) = dl.download_bytes();
+            let px = |x: usize, y: usize| bytes[y * stride + x * 4..][..3].to_vec();
+            assert_eq!(px(10, 10), [255, 0, 0], "page content kept");
+            let edge = px(400, 300);
+            assert!(edge[2] > 200 && edge[0] < 60, "blue mark drawn: {edge:?}");
+            assert_eq!(px(590, 390), [255, 255, 255], "white elsewhere");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Save the whole document: three pages, a mark on page 2 and a crop
+    /// on page 3. Pages keep their size (page 3 takes the crop's), the mark
+    /// shows, and page 1's text is still text.
+    #[test]
+    fn saves_every_page_with_marks_as_vector() {
+        use crate::document::{Document, Kind, Rect, Rgba, Shape, Style};
+        let dir = std::env::temp_dir().join(format!("pygoscribe-pdf-doc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("three.pdf");
+        {
+            let surface = cairo::PdfSurface::new(300.0, 200.0, &src).unwrap();
+            let cr = cairo::Context::new(&surface).unwrap();
+            cr.set_source_rgb(0.0, 0.0, 0.0);
+            cr.set_font_size(20.0);
+            cr.move_to(20.0, 50.0);
+            cr.show_text("Hello page one").unwrap();
+            cr.show_page().unwrap();
+            surface.set_size(200.0, 300.0).unwrap();
+            cr.show_page().unwrap();
+            surface.set_size(300.0, 300.0).unwrap();
+            cr.show_page().unwrap();
+            drop(cr);
+            surface.finish();
+        }
+        let pdf = Pdf::open(&gio::File::for_path(&src)).unwrap();
+        assert_eq!(pdf.n_pages(), 3);
+        let style = Style { stroke: Rgba::new(0.0, 0.0, 1.0, 1.0), fill: None, width: 10.0, ..Style::default() };
+        let mut rect = Shape::new(Kind::Rect, (100.0, 100.0), style);
+        rect.b = (300.0, 300.0);
+        let docs = vec![
+            Document::default(),
+            Document { shapes: vec![rect], crop: None, image: None },
+            Document { shapes: vec![], crop: Some(Rect { x: 100.0, y: 100.0, w: 200.0, h: 100.0 }), image: None },
+        ];
+        let out = dir.join("out.pdf");
+        pdf.save_marked(&docs, &out).unwrap();
+
+        let back = Pdf::open(&gio::File::for_path(&out)).unwrap();
+        assert_eq!(back.n_pages(), 3);
+        let size = |i| back.0.page(i).unwrap().size();
+        assert_eq!(size(0), (300.0, 200.0));
+        assert_eq!(size(1), (200.0, 300.0));
+        assert_eq!(size(2), (100.0, 50.0), "cropped page is the crop's size in points");
+        let text = back.0.page(0).unwrap().text().map(|t| t.to_string()).unwrap_or_default();
+        assert!(text.contains("Hello page one"), "text kept as text: {text:?}");
+
+        let (tex, _) = back.render(1).unwrap();
+        let mut dl = gdk::TextureDownloader::new(&tex);
+        dl.set_format(gdk::MemoryFormat::R8g8b8a8);
+        let (bytes, stride) = dl.download_bytes();
+        let px = |x: usize, y: usize| bytes[y * stride + x * 4..][..3].to_vec();
+        let edge = px(100, 200);
+        assert!(edge[2] > 200 && edge[0] < 60, "blue mark drawn: {edge:?}");
+        assert_eq!(px(200, 200), [255, 255, 255]);
+
+        // A wrong number of pages is refused instead of writing a bad file.
+        assert!(pdf.save_marked(&docs[..2], &dir.join("bad.pdf")).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}

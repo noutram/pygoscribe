@@ -1,0 +1,70 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: Pygoscribe
+Upstream-Contact: Nicholas Outram
+Source: https://github.com/noutram/pygoscribe
+Disclaimer:
+ Pygoscribe is free software, provided "as is", WITHOUT ANY WARRANTY, to the
+ extent permitted by applicable law; the entire risk as to its quality and
+ performance is with you. See sections 15 (Disclaimer of Warranty) and 16
+ (Limitation of Liability) of the GNU General Public License version 3, in
+ /usr/share/common-licenses/GPL-3.
+Comment:
+ The complete source code of each release (pygoscribe-<version>-src.tar.xz,
+ with every Rust crate compiled into the binary vendored in vendor/) is
+ published on the same release page as this package.
+
+Files: *
+Copyright: 2026 Nicholas Outram
+License: GPL-3.0-only
+
+Files: data/protocol/gtk-shell.xml
+Copyright: The GTK Project Authors
+License: LGPL-2.1-or-later
+
+Files: data/org.outram.Pygoscribe.metainfo.xml
+Copyright: 2026 Nicholas Outram
+License: CC0-1.0
+
+Files: vendor/*
+Copyright: The authors of each crate, as listed in THIRD-PARTY-LICENSES.md
+License: MIT or Apache-2.0 or Unlicense or Unicode-3.0
+Comment:
+ /usr/bin/pygoscribe statically links Rust crates (gtk-rs, libadwaita-rs,
+ poppler-rs, ksni, wayland-rs, zbus, serde and others) under the MIT,
+ Apache-2.0, Unlicense and Unicode-3.0 licenses, all compatible with
+ GPL-3.0. Each crate's license and copyright notice is reproduced in
+ /usr/share/doc/pygoscribe/THIRD-PARTY-LICENSES.md.
+ .
+ The Apache-2.0 license is at /usr/share/common-licenses/Apache-2.0.
+
+License: GPL-3.0-only
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation, version 3.
+ .
+ This program is distributed in the hope that it will be useful,
+ but WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ GNU General Public License for more details.
+ .
+ You should have received a copy of the GNU General Public License
+ along with this program. If not, see <https://www.gnu.org/licenses/>.
+ .
+ On Debian systems, the complete text of the GNU General Public License
+ version 3 can be found in "/usr/share/common-licenses/GPL-3".
+
+License: LGPL-2.1-or-later
+ This library is free software; you can redistribute it and/or
+ modify it under the terms of the GNU Lesser General Public
+ License as published by the Free Software Foundation; either
+ version 2.1 of the License, or (at your option) any later version.
+ .
+ On Debian systems, the complete text of the GNU Lesser General Public
+ License version 2.1 can be found in "/usr/share/common-licenses/LGPL-2.1".
+
+License: CC0-1.0
+ To the extent possible under law, the author has waived all copyright
+ and related or neighboring rights to this file.
+ .
+ On Debian systems, the complete text of the CC0 1.0 Universal license
+ can be found in "/usr/share/common-licenses/CC0-1.0".

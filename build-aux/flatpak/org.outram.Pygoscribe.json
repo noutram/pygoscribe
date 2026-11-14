@@ -1,0 +1,94 @@
+{
+    "id": "org.outram.Pygoscribe",
+    "runtime": "org.gnome.Platform",
+    "runtime-version": "50",
+    "sdk": "org.gnome.Sdk",
+    "sdk-extensions": [
+        "org.freedesktop.Sdk.Extension.rust-stable"
+    ],
+    "command": "pygoscribe",
+    "finish-args": [
+        "--share=ipc",
+        "--socket=wayland",
+        "--socket=fallback-x11",
+        "--device=dri",
+        "--talk-name=org.kde.StatusNotifierWatcher",
+        "--filesystem=xdg-pictures/Markup-Sent:create",
+        "--filesystem=~/.var/app/org.outram.GtkMarkup/config/gtkmarkup:ro"
+    ],
+    "build-options": {
+        "append-path": "/usr/lib/sdk/rust-stable/bin",
+        "env": {
+            "CARGO_HOME": "/run/build/pygoscribe/cargo"
+        }
+    },
+    "modules": [
+        {
+            "name": "poppler",
+            "buildsystem": "cmake-ninja",
+            "config-opts": [
+                "-DCMAKE_BUILD_TYPE=Release",
+                "-DENABLE_GLIB=ON",
+                "-DENABLE_CPP=OFF",
+                "-DENABLE_UTILS=OFF",
+                "-DENABLE_QT5=OFF",
+                "-DENABLE_QT6=OFF",
+                "-DENABLE_BOOST=OFF",
+                "-DENABLE_NSS3=OFF",
+                "-DENABLE_GPGME=OFF",
+                "-DENABLE_LIBCURL=OFF",
+                "-DENABLE_LIBOPENJPEG=none",
+                "-DENABLE_GOBJECT_INTROSPECTION=OFF",
+                "-DENABLE_GTK_DOC=OFF",
+                "-DBUILD_GTK_TESTS=OFF",
+                "-DBUILD_CPP_TESTS=OFF",
+                "-DBUILD_MANUAL_TESTS=OFF",
+                "-DBUILD_QT5_TESTS=OFF",
+                "-DBUILD_QT6_TESTS=OFF",
+                "-DENABLE_UNSTABLE_API_ABI_HEADERS=OFF"
+            ],
+            "cleanup": [
+                "/include",
+                "/lib/pkgconfig",
+                "/lib/cmake"
+            ],
+            "sources": [
+                {
+                    "type": "archive",
+                    "url": "https://poppler.freedesktop.org/poppler-26.11.0.tar.xz",
+                    "sha256": "41c32680160addf5a8dd7a830e4869c01e9f6bee1abb91e44fabd1ba9d7828fb"
+                }
+            ]
+        },
+        {
+            "name": "pygoscribe",
+            "buildsystem": "simple",
+            "build-options": {
+                "build-args": [
+                    "--share=network"
+                ]
+            },
+            "build-commands": [
+                "cargo build --release --locked",
+                "install -Dm755 target/release/pygoscribe -t /app/bin/",
+                "install -Dm644 data/org.outram.Pygoscribe.desktop -t /app/share/applications/",
+                "install -Dm644 data/org.outram.Pygoscribe.metainfo.xml -t /app/share/metainfo/",
+                "install -Dm644 data/icons/hicolor/scalable/apps/org.outram.Pygoscribe.svg -t /app/share/icons/hicolor/scalable/apps/",
+                "install -Dm644 LICENSE THIRD-PARTY-LICENSES.md -t /app/share/licenses/org.outram.Pygoscribe/"
+            ],
+            "sources": [
+                {
+                    "type": "dir",
+                    "path": "../..",
+                    "skip": [
+                        "target",
+                        ".flatpak-builder",
+                        "build-dir",
+                        "repo",
+                        "dist"
+                    ]
+                }
+            ]
+        }
+    ]
+}

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <gresource prefix="/org/outram/Pygoscribe/icons/scalable/actions">
+    <file preprocess="xml-stripblanks" alias="markup-arrow-symbolic.svg">scalable/actions/markup-arrow-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="markup-border-symbolic.svg">scalable/actions/markup-border-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="markup-bubble-symbolic.svg">scalable/actions/markup-bubble-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="markup-crop-symbolic.svg">scalable/actions/markup-crop-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="markup-fill-symbolic.svg">scalable/actions/markup-fill-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="markup-highlighter-symbolic.svg">scalable/actions/markup-highlighter-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="markup-line-symbolic.svg">scalable/actions/markup-line-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="markup-loupe-symbolic.svg">scalable/actions/markup-loupe-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="markup-oval-symbolic.svg">scalable/actions/markup-oval-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="markup-pen-symbolic.svg">scalable/actions/markup-pen-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="markup-rect-symbolic.svg">scalable/actions/markup-rect-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="markup-scale-symbolic.svg">scalable/actions/markup-scale-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="markup-select-symbolic.svg">scalable/actions/markup-select-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="markup-text-symbolic.svg">scalable/actions/markup-text-symbolic.svg</file>
+  </gresource>
+</gresources>

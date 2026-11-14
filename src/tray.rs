@@ -12,13 +12,21 @@
 
 //! Top-bar icon using the StatusNotifierItem protocol, shown on Ubuntu by the
 //! built-in AppIndicator extension.
+//!
+//! GTK4 has no tray API, so the icon is served over D-Bus by the `ksni`
+//! crate. `ksni`'s blocking API runs the D-Bus service on a thread of its
+//! own; menu clicks arrive on that thread, so [`MarkupTray`] never touches
+//! GTK. It sends a [`Request`] to the main thread instead (see
+//! `start_tray` in `main.rs`).
 
 use crate::Request;
 use async_channel::Sender;
 use ksni::blocking::TrayMethods;
 use ksni::menu::{CheckmarkItem, MenuItem, StandardItem};
 
+/// The tray icon's state, owned by the `ksni` thread.
 pub struct MarkupTray {
+    /// Where clicks are sent, to be handled on the GTK main thread.
     tx: Sender<Request>,
     /// Whether "Start at Login" shows a tick. The app updates this through
     /// the handle after it has changed the setting.
@@ -26,6 +34,9 @@ pub struct MarkupTray {
 }
 
 impl MarkupTray {
+    /// Queues `req` for the main thread. The channel is unbounded, so this
+    /// only fails once the app has stopped listening, when there is nothing
+    /// useful to do about it.
     fn send(&self, req: Request) {
         let _ = self.tx.try_send(req);
     }
@@ -48,6 +59,8 @@ impl MarkupTray {
         self.send(req(token));
     }
 
+    /// A plain menu item that sends `req` (with the activation token) when
+    /// clicked. `_` in the label marks the mnemonic.
     fn item(label: &str, icon: &str, req: fn(Option<String>) -> Request) -> MenuItem<Self> {
         StandardItem {
             label: label.into(),
@@ -59,23 +72,31 @@ impl MarkupTray {
     }
 }
 
+/// What the StatusNotifierItem host (the AppIndicator extension) asks for.
 impl ksni::Tray for MarkupTray {
+    /// The item's ID, which the host uses to tell icons apart.
     fn id(&self) -> String {
         crate::APP_ID.into()
     }
 
+    /// The tooltip and accessible name.
     fn title(&self) -> String {
         "Pygoscribe".into()
     }
 
+    /// A symbolic theme icon, so it takes the top bar's colour.
     fn icon_name(&self) -> String {
         "document-edit-symbolic".into()
     }
 
+    /// A primary click on the icon itself. The AppIndicator extension
+    /// normally opens the menu instead, but other hosts may call this.
     fn activate(&mut self, _x: i32, _y: i32) {
         self.send_with_token(Request::MarkupClipboard);
     }
 
+    /// The icon's menu. ksni calls this again after each `Handle::update`,
+    /// which is how the Start at Login tick follows the setting.
     fn menu(&self) -> Vec<MenuItem<Self>> {
         vec![
             Self::item("Mark Up _Clipboard", "edit-paste-symbolic", Request::MarkupClipboard),

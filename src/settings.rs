@@ -25,19 +25,28 @@ use gtk::prelude::*;
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
+/// Key-file group for the toolbar style (colours, width, font).
 const STYLE: &str = "style";
+/// Key-file group for the last open and save folders.
 const FOLDERS: &str = "folders";
+/// Key-file group for the last save format.
 const SAVE: &str = "save";
+/// Key-file group for view options (the page sidebar).
 const VIEW: &str = "view";
 
+/// A format Save As can write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SaveFormat {
+    /// Lossless, with transparency. The default.
     Png,
+    /// Lossy, smaller; transparency is flattened.
     Jpeg,
+    /// One page for a picture, every page for an open PDF.
     Pdf,
 }
 
 impl SaveFormat {
+    /// The extension used for new file names (`jpg`, not `jpeg`).
     pub fn extension(self) -> &'static str {
         match self {
             Self::Png => "png",
@@ -57,6 +66,8 @@ impl SaveFormat {
         }
     }
 
+    /// The value stored in the settings file. Kept separate from
+    /// [`Self::extension`] so the file format can't change by accident.
     fn key(self) -> &'static str {
         match self {
             Self::Png => "png",
@@ -69,6 +80,8 @@ impl SaveFormat {
 /// `name` with its image extension swapped for `format`'s, or `format`'s
 /// added if it has none.
 pub fn with_extension(name: &str, format: SaveFormat) -> String {
+    // Only strip an extension we recognise, so "notes.v2" keeps its ".v2";
+    // a name that is all extension (".png") is kept whole.
     let stem = match name.rsplit_once('.') {
         Some((stem, ext)) if !stem.is_empty() && SaveFormat::from_path(Path::new(&format!("x.{ext}"))).is_some() => stem,
         _ => name,
@@ -76,28 +89,42 @@ pub fn with_extension(name: &str, format: SaveFormat) -> String {
     format!("{stem}.{}", format.extension())
 }
 
+/// Everything Pygoscribe remembers between uses.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
+    /// Border (stroke) colour, also used for text.
     pub stroke: Rgba,
+    /// Whether new shapes get a border.
     pub border_on: bool,
     /// Kept even while fill is off, so turning it back on restores the colour.
     pub fill: Rgba,
+    /// Whether new shapes are filled.
     pub fill_on: bool,
+    /// Line width in image pixels.
     pub width: f64,
+    /// Text size in points (image pixels at 100 %).
     pub font_size: f64,
     /// Pango font description without a size.
     pub font: String,
+    /// Where the Open dialog starts.
     pub open_folder: Option<PathBuf>,
+    /// Where the Save dialogs start.
     pub save_folder: Option<PathBuf>,
+    /// What Save As writes by default.
     pub save_format: SaveFormat,
     /// Whether the page sidebar is shown.
     pub sidebar_visible: bool,
 }
 
+/// The fill colour before the user picks one: a pale yellow.
 pub const DEFAULT_FILL: Rgba = Rgba::new(1.0, 0.96, 0.6, 1.0);
+/// Allowed line widths (min, max); stored values are clamped to it.
 pub const WIDTH_RANGE: (f64, f64) = (1.0, 40.0);
+/// Allowed text sizes (min, max); stored values are clamped to it.
 pub const FONT_RANGE: (f64, f64) = (6.0, 200.0);
 
+/// The defaults follow [`Style::default`], so a fresh install and a new mark
+/// agree.
 impl Default for Settings {
     fn default() -> Self {
         let style = Style::default();
@@ -118,6 +145,8 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// Reads the key file at `path`. Each value is checked on its own, so
+    /// one bad entry only resets that entry to its default.
     pub fn load_from(path: &Path) -> Self {
         let mut s = Self::default();
         let kf = glib::KeyFile::new();
@@ -146,6 +175,7 @@ impl Settings {
         if let Some(f) = read_number(&kf, STYLE, "font-size", FONT_RANGE) {
             s.font_size = f;
         }
+        // Reject empty or absurdly long font names rather than hand Pango junk.
         if let Ok(f) = kf.string(STYLE, "font") {
             let f = f.trim();
             if !f.is_empty() && f.len() < 200 {
@@ -165,8 +195,11 @@ impl Settings {
         s
     }
 
+    /// Writes every setting to `path`, creating its folder if needed.
     pub fn save_to(&self, path: &Path) -> Result<(), glib::Error> {
         let kf = glib::KeyFile::new();
+        // Colours are stored as "r;g;b;a" (0–1 each), which KeyFile reads
+        // back as a double list.
         let colour = |key: &str, c: Rgba| kf.set_string(STYLE, key, &format!("{};{};{};{}", c.r, c.g, c.b, c.a));
         colour("stroke", self.stroke);
         colour("fill", self.fill);
@@ -190,12 +223,15 @@ impl Settings {
     }
 }
 
+/// A colour stored as four numbers between 0 and 1, or `None` if it's
+/// missing or malformed.
 fn read_colour(kf: &glib::KeyFile, group: &str, key: &str) -> Option<Rgba> {
     let v = kf.double_list(group, key).ok()?;
     let ok = v.len() == 4 && v.iter().all(|x| x.is_finite() && (0.0..=1.0).contains(x));
     ok.then(|| Rgba::new(v[0], v[1], v[2], v[3]))
 }
 
+/// A finite number clamped into `lo..=hi`, or `None` if missing or NaN/inf.
 fn read_number(kf: &glib::KeyFile, group: &str, key: &str, (lo, hi): (f64, f64)) -> Option<f64> {
     let v = kf.double(group, key).ok()?;
     v.is_finite().then(|| v.clamp(lo, hi))
@@ -207,11 +243,15 @@ fn read_folder(kf: &glib::KeyFile, key: &str) -> Option<PathBuf> {
     (dir.is_absolute() && dir.is_dir()).then_some(dir)
 }
 
+/// Where the settings file lives (see the module docs).
 pub fn path() -> PathBuf {
     glib::user_config_dir().join("pygoscribe").join("settings.ini")
 }
 
+// The in-memory copy, shared by every window. GTK is single-threaded, so a
+// thread-local RefCell on the main thread is all the sharing needed.
 thread_local! {
+    /// `None` until the first [`get`].
     static CURRENT: RefCell<Option<Settings>> = const { RefCell::new(None) };
 }
 
@@ -251,6 +291,8 @@ pub fn folder_of(file: &gio::File) -> Option<PathBuf> {
     dir.is_absolute().then_some(dir)
 }
 
+/// Whether `path` is under `/run/user/<uid>/doc/`, where the document portal
+/// exposes files picked from inside a sandbox.
 fn is_document_portal_path(path: &Path) -> bool {
     let mut parts = path.components().skip(1).map(|c| c.as_os_str().to_string_lossy());
     parts.next().as_deref() == Some("run")
@@ -288,6 +330,7 @@ fn unescape_xattr(s: &str) -> String {
 mod tests {
     use super::*;
 
+    /// A fresh, empty folder for one test, unique to this process.
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("pygoscribe-test-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -295,12 +338,14 @@ mod tests {
         dir
     }
 
+    /// No file at all is not an error.
     #[test]
     fn missing_file_gives_defaults() {
         let dir = temp_dir("missing");
         assert_eq!(Settings::load_from(&dir.join("nope.ini")), Settings::default());
     }
 
+    /// A file that isn't a key file is ignored as a whole.
     #[test]
     fn corrupt_file_gives_defaults() {
         let dir = temp_dir("corrupt");
@@ -309,6 +354,7 @@ mod tests {
         assert_eq!(Settings::load_from(&path), Settings::default());
     }
 
+    /// Every field survives a save and load.
     #[test]
     fn round_trip() {
         let dir = temp_dir("roundtrip");
@@ -330,6 +376,7 @@ mod tests {
         assert_eq!(Settings::load_from(&path), s);
     }
 
+    /// Bad individual values fall back to defaults or are clamped.
     #[test]
     fn bad_values_fall_back_or_clamp() {
         let dir = temp_dir("bad");
@@ -352,6 +399,7 @@ mod tests {
         assert_eq!(s.save_format, SaveFormat::Png);
     }
 
+    /// A file with both border and fill off gets its border back.
     #[test]
     fn border_and_fill_not_both_off() {
         let dir = temp_dir("nofill");
@@ -362,6 +410,7 @@ mod tests {
         assert!(!s.fill_on);
     }
 
+    /// Extensions are matched case-insensitively; unknown ones give `None`.
     #[test]
     fn format_from_extension() {
         assert_eq!(SaveFormat::from_path(Path::new("a.PNG")), Some(SaveFormat::Png));
@@ -372,6 +421,7 @@ mod tests {
         assert_eq!(SaveFormat::from_path(Path::new("a.gif")), None);
     }
 
+    /// Only known image/PDF extensions are replaced.
     #[test]
     fn swaps_extension() {
         assert_eq!(with_extension("Markup 1.png", SaveFormat::Jpeg), "Markup 1.jpg");
@@ -384,12 +434,14 @@ mod tests {
         assert_eq!(with_extension(".png", SaveFormat::Jpeg), ".png.jpg");
     }
 
+    /// An ordinary path's folder is its parent.
     #[test]
     fn folder_of_plain_file() {
         let f = gio::File::for_path("/home/someone/Pictures/shot.png");
         assert_eq!(folder_of(&f), Some(PathBuf::from("/home/someone/Pictures")));
     }
 
+    /// Only `/run/user/<uid>/doc/...` counts as a document-portal path.
     #[test]
     fn document_portal_paths() {
         assert!(is_document_portal_path(Path::new("/run/user/1000/doc/abc123/x.png")));
@@ -397,6 +449,7 @@ mod tests {
         assert!(!is_document_portal_path(Path::new("/home/u/doc/x.png")));
     }
 
+    /// `\xNN` escapes are decoded and trailing NULs dropped.
     #[test]
     fn unescapes_xattr() {
         assert_eq!(unescape_xattr("/home/u/My\\x20Pics/a.png\\x00"), "/home/u/My Pics/a.png");

@@ -11,6 +11,32 @@
 // details.
 
 //! The editor window: header bar, markup toolbar and canvas.
+//!
+//! # Layout
+//!
+//! ```text
+//! AdwApplicationWindow
+//! └─ AdwToolbarView
+//!    ├─ AdwHeaderBar   pages · paste · open · zoom · scale … undo · send · save · copy · menu
+//!    ├─ toolbar        tool buttons · border/fill colours · width · font · size
+//!    └─ AdwToastOverlay
+//!       └─ AdwOverlaySplitView (Sidebar)
+//!          ├─ page thumbnails
+//!          └─ GtkStack: "empty" status page | "image" (the Canvas)
+//! ```
+//!
+//! Most commands are `win.*` actions, so the header buttons, menus, context
+//! menu and keyboard shortcuts all share one implementation and GTK keeps
+//! their sensitivity in step.
+//!
+//! # Wayland activation tokens
+//!
+//! Under Wayland a new window may only take focus if it presents an XDG
+//! activation token from the event that caused it. Clicks on the top-bar
+//! icon carry such a token (see `tray.rs`), which is parked in
+//! [`set_activation_token`] and handed to the next window that is presented.
+//! When a click opens no window, [`release_activation_token`] passes the
+//! token straight back to GNOME Shell so its busy pointer stops.
 
 use crate::canvas::Canvas;
 use crate::document::{Rgba, Style, Tool};
@@ -22,20 +48,28 @@ use gtk::{gdk, gio, glib};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+/// One editor window. Cheap to clone: every field is a GObject or an `Rc`.
 #[derive(Clone)]
 pub struct MarkupWindow {
+    /// The toplevel window.
     window: adw::ApplicationWindow,
+    /// Switches between the empty status page and the canvas.
     stack: gtk::Stack,
     /// The header's title, with the image size as its subtitle.
     title: adw::WindowTitle,
+    /// The markup canvas, which holds the current page's state.
     canvas: Canvas,
+    /// Shows short messages ("Copied", errors) over the content.
     toasts: adw::ToastOverlay,
     /// What is open: a picture, or every page of a PDF. None before anything
     /// is opened.
     pages: Rc<RefCell<Option<Pages>>>,
+    /// The page thumbnails.
     sidebar: Sidebar,
 }
 
+/// The tool buttons, in tool-bar order: the tool, its icon (from the
+/// app's bundled icons) and its tooltip.
 const TOOLS: &[(Tool, &str, &str)] = &[
     (Tool::Select, "markup-select-symbolic", "Select (V) · Alt+drag to rotate"),
     (Tool::Pen, "markup-pen-symbolic", "Draw (P)"),
@@ -50,10 +84,12 @@ const TOOLS: &[(Tool, &str, &str)] = &[
     (Tool::Crop, "markup-crop-symbolic", "Crop (C)"),
 ];
 
+/// Converts a document colour to GDK's (f32 channels).
 fn to_gdk(c: Rgba) -> gdk::RGBA {
     gdk::RGBA::new(c.r as f32, c.g as f32, c.b as f32, c.a as f32)
 }
 
+/// Converts a GDK colour to a document colour.
 fn from_gdk(c: &gdk::RGBA) -> Rgba {
     Rgba::new(c.red() as f64, c.green() as f64, c.blue() as f64, c.alpha() as f64)
 }
@@ -63,14 +99,20 @@ fn from_gdk(c: &gdk::RGBA) -> Rgba {
 /// own alpha slider stays available and the two agree.
 #[derive(Clone)]
 struct ColourControl {
+    /// The colour button and opacity button side by side.
     widget: gtk::Box,
+    /// Opens GTK's colour chooser (with alpha).
     colour: gtk::ColorDialogButton,
+    /// Opacity in percent, 0–100; mirrors the colour's alpha.
     opacity: gtk::Adjustment,
 }
 
+/// The quick opacity choices under the slider, in percent.
 const OPACITY_PRESETS: [u32; 4] = [100, 75, 50, 25];
 
 impl ColourControl {
+    /// A control starting at colour `c`; `what` ("Border", "Fill") names it in
+    /// tooltips.
     fn new(c: Rgba, what: &str) -> Self {
         let colour = gtk::ColorDialogButton::new(Some(gtk::ColorDialog::builder().with_alpha(true).build()));
         colour.set_tooltip_text(Some(&format!("{what} Colour")));
@@ -142,10 +184,12 @@ impl ColourControl {
         this
     }
 
+    /// The current colour, alpha included.
     fn rgba(&self) -> Rgba {
         from_gdk(&self.colour.rgba())
     }
 
+    /// Shows colour `c` (the opacity follows through the notify handler).
     fn set(&self, c: Rgba) {
         self.colour.set_rgba(&to_gdk(c));
     }
@@ -160,17 +204,27 @@ impl ColourControl {
 /// The style controls in the markup toolbar.
 #[derive(Clone)]
 struct StyleControls {
+    /// Border on/off for rectangles, ovals and bubbles.
     border_on: gtk::ToggleButton,
+    /// Border, line and text colour.
     stroke: ColourControl,
+    /// Fill on/off.
     fill_on: gtk::ToggleButton,
+    /// Fill colour.
     fill: ColourControl,
+    /// Line width.
     width: gtk::SpinButton,
+    /// Text size.
     font: gtk::SpinButton,
+    /// Font family and style (no size).
     face: gtk::FontDialogButton,
+    /// Set while [`Self::show`] loads a selected mark's style into the
+    /// controls, so that isn't mistaken for the user restyling it.
     syncing: Rc<Cell<bool>>,
 }
 
 impl StyleControls {
+    /// The controls, set to the remembered settings.
     fn new() -> Self {
         let saved = crate::settings::get();
         let border_on = gtk::ToggleButton::builder()
@@ -210,6 +264,9 @@ impl StyleControls {
         face.connect_font_desc_notify(show_name);
         // Long names like "DejaVu Sans Condensed Bold Oblique" would widen the
         // toolbar (and the window's minimum width), so shorten the labels.
+        // FontDialogButton doesn't expose its labels, so walk its widget tree
+        // depth-first (child, else next sibling, else an ancestor's next
+        // sibling, stopping at the button) and ellipsize every label found.
         let mut child = face.first_child();
         while let Some(w) = child {
             if let Some(l) = w.downcast_ref::<gtk::Label>() {
@@ -246,6 +303,7 @@ impl StyleControls {
         this
     }
 
+    /// The style the controls describe, for new marks or the selected one.
     fn style(&self) -> Style {
         Style {
             stroke: self.stroke.rgba(),
@@ -261,6 +319,7 @@ impl StyleControls {
     fn font_name(&self) -> String {
         match self.face.font_desc() {
             Some(mut d) => {
+                // The size comes from the Text Size control instead.
                 d.unset_fields(gtk::pango::FontMask::SIZE);
                 let name = d.to_str().to_string();
                 if name.trim().is_empty() { crate::document::DEFAULT_FONT.to_string() } else { name }
@@ -286,22 +345,29 @@ impl StyleControls {
         });
     }
 
+    /// Loads `style` (the selected mark's) into the controls without
+    /// treating it as a change.
     fn show(&self, style: &Style) {
         self.syncing.set(true);
         self.stroke.set(style.stroke);
         self.border_on.set_active(style.border);
         self.fill_on.set_active(style.fill.is_some());
+        // With fill off, keep showing the last fill colour, so turning fill
+        // on again brings it back.
         if let Some(f) = style.fill {
             self.fill.set(f);
         }
         self.width.set_value(style.width);
         self.font.set_value(style.font_size);
+        // Only when it differs: setting it re-emits notify and rebuilds labels.
         if self.font_name() != style.font {
             self.face.set_font_desc(&gtk::pango::FontDescription::from_string(&style.font));
         }
         self.syncing.set(false);
     }
 
+    /// Calls `f` with the new style whenever the user changes any control,
+    /// and remembers the new values in the settings.
     fn connect_changed(&self, f: impl Fn(Style) + 'static) {
         let f = Rc::new(f);
         let emit = {
@@ -329,6 +395,7 @@ impl StyleControls {
     }
 }
 
+/// A dimmed caption for a tool-bar control ("Width", "Text").
 fn label(text: &str) -> gtk::Label {
     let l = gtk::Label::new(Some(text));
     l.add_css_class("dim-label");
@@ -337,6 +404,8 @@ fn label(text: &str) -> gtk::Label {
 }
 
 impl MarkupWindow {
+    /// Builds a window with every widget, action and shortcut, showing the
+    /// empty page. It isn't shown until [`Self::present`].
     pub fn new(app: &adw::Application) -> Self {
         let header = adw::HeaderBar::new();
         let title = adw::WindowTitle::new("Pygoscribe", "");
@@ -470,12 +539,15 @@ impl MarkupWindow {
         for (tool, icon, tip) in TOOLS {
             let b = gtk::ToggleButton::builder().icon_name(*icon).tooltip_text(*tip).build();
             b.add_css_class("flat");
+            // All tool buttons share one group, so exactly one is active.
             if let Some(g) = &group {
                 b.set_group(Some(g));
             } else {
                 b.set_active(true);
                 group = Some(b.clone());
             }
+            // Separators group the tools: select | freehand | lines and
+            // shapes | text | loupe and crop.
             if matches!(tool, Tool::Select | Tool::Highlighter | Tool::Bubble | Tool::Loupe) {
                 toolbar.append(&gtk::Separator::new(gtk::Orientation::Vertical));
             }
@@ -525,6 +597,8 @@ impl MarkupWindow {
             .content(&view)
             .build();
 
+        // The header toggle and the split view's own state stay in step
+        // both ways (F9 and swipe gestures change the split view directly).
         sidebar
             .widget()
             .bind_property("show-sidebar", &sidebar_btn, "active")
@@ -535,6 +609,7 @@ impl MarkupWindow {
         let this = Self { window, stack, title, canvas, toasts, pages: Rc::new(RefCell::new(None)), sidebar };
 
         {
+            // Remember the sidebar's visibility; only write when it changed.
             this.sidebar.widget().connect_show_sidebar_notify(move |s| {
                 let shown = s.shows_sidebar();
                 if crate::settings::get().sidebar_visible != shown {
@@ -566,6 +641,7 @@ impl MarkupWindow {
         let buttons = tool_buttons.clone();
         let w = this.clone();
         keys.connect_key_pressed(move |_, key, _, mods| {
+            // Page Up/Down and Home/End change PDF page (with or without Ctrl).
             if mods.is_empty() || mods == gdk::ModifierType::CONTROL_MASK {
                 let step = match key {
                     gdk::Key::Page_Up | gdk::Key::KP_Page_Up => Some(PageStep::Previous),
@@ -579,6 +655,8 @@ impl MarkupWindow {
                     return glib::Propagation::Stop;
                 }
             }
+            // Letters with Ctrl or Alt are shortcuts for other things (Ctrl+C
+            // is Copy), so only bare or Shifted letters pick a tool.
             if !mods.is_empty() && mods != gdk::ModifierType::SHIFT_MASK {
                 return glib::Propagation::Proceed;
             }
@@ -596,6 +674,8 @@ impl MarkupWindow {
                 gdk::Key::c => Tool::Crop,
                 _ => return glib::Propagation::Proceed,
             };
+            // Activating the button runs its toggled handler, so the canvas
+            // and the tool bar can't disagree.
             if let Some((_, b)) = buttons.iter().find(|(t, _)| *t == tool) {
                 b.set_active(true);
             }
@@ -611,6 +691,7 @@ impl MarkupWindow {
             let style = style.clone();
             let canvas = this.canvas.clone();
             let w = this.clone();
+            // Show a newly selected mark's style in the tool bar.
             this.canvas.connect_selection_changed(move |s| {
                 if let Some(s) = s {
                     style.show(&s);
@@ -651,6 +732,8 @@ impl MarkupWindow {
                 // Redraw this page's thumbnail once the changes settle.
                 let w2 = w.clone();
                 w.sidebar.refresh_later(move || {
+                    // try_borrow: this may fire while a page switch holds the
+                    // pages; the switch redraws thumbnails itself then.
                     let cur = w2.pages.try_borrow().ok().and_then(|p| p.as_ref().map(|p| p.current()));
                     if let Some(cur) = cur {
                         w2.sidebar.refresh(cur);
@@ -664,6 +747,7 @@ impl MarkupWindow {
         app.set_accels_for_action("win.undo", &["<Control>z"]);
         app.set_accels_for_action("win.redo", &["<Control><Shift>z", "<Control>y"]);
 
+        // Adds a stateless `win.<name>` action that calls `f` on this window.
         let add = |name: &str, f: fn(&MarkupWindow)| {
             let action = gio::SimpleAction::new(name, None);
             let target = this.clone();
@@ -743,10 +827,14 @@ impl MarkupWindow {
         this
     }
 
+    /// The application this window belongs to.
     fn app(&self) -> adw::Application {
         self.window.application().and_downcast().expect("window has an app")
     }
 
+    /// Shows the window and gives it focus. A pending top-bar activation
+    /// token is used up here, so the window may take focus under Wayland and
+    /// GNOME Shell's launch (busy pointer) completes.
     pub fn present(&self) {
         if let Some(token) = ACTIVATION_TOKEN.take() {
             self.window.set_startup_id(&token);
@@ -778,6 +866,7 @@ impl MarkupWindow {
         }
     }
 
+    /// Copy: puts the full-resolution result on the clipboard.
     fn copy(&self) {
         if let Some(tex) = self.result() {
             self.window.clipboard().set_texture(&tex);
@@ -807,6 +896,8 @@ impl MarkupWindow {
         crate::output::default_name(format.extension())
     }
 
+    /// Save As in `format`: asks for a file name, then saves. Uses GTK's own
+    /// dialog outside Flatpak and the file-chooser portal inside it.
     fn save_as(&self, format: SaveFormat) {
         if self.pages.borrow().is_none() {
             self.toast("There is no image to export yet");
@@ -822,6 +913,7 @@ impl MarkupWindow {
         }
     }
 
+    /// One file filter per save format, for the dialogs' type lists.
     fn format_filters() -> [(SaveFormat, gtk::FileFilter); 3] {
         let png = gtk::FileFilter::new();
         png.set_name(Some("PNG Image"));
@@ -866,6 +958,7 @@ impl MarkupWindow {
         let format_of = Rc::new(format_of);
         {
             let format_of = format_of.clone();
+            // Picking a type in the list rewrites the name's extension.
             dialog.connect_filter_notify(move |d| {
                 let (Some(fmt), Some(name)) = (format_of(d), d.current_name()) else { return };
                 let renamed = crate::settings::with_extension(&name, fmt);
@@ -913,6 +1006,8 @@ impl MarkupWindow {
         });
     }
 
+    /// Writes the result to `file` once a name has been chosen, then
+    /// remembers the format and folder and shows a toast.
     fn finish_save(&self, file: &gio::File, chosen: SaveFormat) {
         let Some(path) = file.path() else { return };
         // An extension typed in the name wins; with none, use the chosen format.
@@ -933,6 +1028,8 @@ impl MarkupWindow {
         };
         match result {
             Ok(()) => {
+                // A Flatpak document-portal path may not reveal its real
+                // folder; then keep the previously remembered one.
                 let folder = crate::settings::folder_of(file);
                 crate::settings::update(|s| {
                     s.save_format = used;
@@ -1043,6 +1140,9 @@ impl MarkupWindow {
             view.append(Some("Zoom to Fit"), Some("win.zoom-fit"));
             menu.append_section(None, &view);
         }
+        // A fresh popover each time, pointing at the click, parented to the
+        // canvas and unparented again (from an idle, not inside its own
+        // `closed` handler) once it closes.
         let popover = gtk::PopoverMenu::from_model(Some(&menu));
         popover.set_has_arrow(false);
         popover.set_halign(gtk::Align::Start);
@@ -1094,6 +1194,8 @@ impl MarkupWindow {
         });
     }
 
+    /// Writes the result over the original file once the user has agreed:
+    /// every page for a PDF, the current picture otherwise.
     fn write_original(&self, original: &crate::output::Original) {
         use crate::output::OriginalFormat;
         let result = match &original.format {
@@ -1125,6 +1227,8 @@ impl MarkupWindow {
         }
     }
 
+    /// Send To → Open With…: hands a copy of the result to an app the user
+    /// picks. Closing the chooser isn't an error.
     fn open_with(&self) {
         let Some(tex) = self.result() else { return };
         let this = self.clone();
@@ -1136,6 +1240,9 @@ impl MarkupWindow {
         });
     }
 
+    /// Send To → Email…: starts an email with the result attached, or, for a
+    /// mail app that can't take attachments, a blank email with the image on
+    /// the clipboard to paste in.
     fn email(&self) {
         let Some(tex) = self.result() else { return };
         let this = self.clone();
@@ -1153,6 +1260,7 @@ impl MarkupWindow {
         });
     }
 
+    /// Shows `msg` briefly at the bottom of the window.
     fn toast(&self, msg: &str) {
         self.toasts.add_toast(adw::Toast::new(msg));
     }
@@ -1162,6 +1270,8 @@ impl MarkupWindow {
         self.open_picture(texture, name, None);
     }
 
+    /// Opens a single picture; `original` is the file Save can write back
+    /// to, if any.
     fn open_picture(&self, texture: &gdk::Texture, name: Option<String>, original: Option<crate::output::Original>) {
         match crate::render::surface_from_texture(texture) {
             Ok(surface) => {
@@ -1216,7 +1326,10 @@ impl MarkupWindow {
             }
         };
         // Take the leaving page off the canvas (finishing any text edit), then
-        // put the arriving page's own state on.
+        // put the arriving page's own state on. Two swaps because the canvas
+        // must give up the leaving state before `Pages::switch` can store it
+        // and hand back the arriving one; the placeholder in between is
+        // never drawn.
         let leaving = self.canvas.swap_page(image.clone(), PageState::default());
         let (left, arriving) = {
             let mut pages = self.pages.borrow_mut();
@@ -1234,6 +1347,7 @@ impl MarkupWindow {
         self.draw_thumbnails();
     }
 
+    /// Moves to the previous, next, first or last page, stopping at the ends.
     fn step_page(&self, step: PageStep) {
         let target = {
             let pages = self.pages.borrow();
@@ -1257,14 +1371,18 @@ impl MarkupWindow {
         }
         let this = self.clone();
         let id = glib::idle_add_local(move || {
+            // Work in slices of about 30 ms, then return to the main loop so
+            // input and drawing stay responsive; GLib calls us again when idle.
             let start = std::time::Instant::now();
             while start.elapsed() < std::time::Duration::from_millis(30) {
                 let Some(i) = this.sidebar.next_pending() else {
                     this.sidebar.idle().borrow_mut().take();
                     return glib::ControlFlow::Break;
                 };
+                // Busy (a page switch in progress): try again next idle.
                 let Ok(pages) = this.pages.try_borrow() else { break };
                 let Some(p) = pages.as_ref() else { continue };
+                // The current page's marks live on the canvas, not in Pages.
                 let doc = match p.doc(i) {
                     Some(d) => d.clone(),
                     None if i == p.current() => this.canvas.document(),
@@ -1277,6 +1395,7 @@ impl MarkupWindow {
         *self.sidebar.idle().borrow_mut() = Some(id);
     }
 
+    /// Sets the window and header title from the file name and page.
     fn update_title(&self) {
         let title = match &*self.pages.borrow() {
             Some(p) => match (&p.name, p.len()) {
@@ -1320,6 +1439,8 @@ impl MarkupWindow {
             self.read_clipboard();
             return;
         }
+        // A one-shot handler: it disconnects itself the first time the window
+        // becomes active. It needs its own ID, hence the shared cell.
         let handler = std::rc::Rc::new(std::cell::Cell::new(None));
         let id = self.window.connect_is_active_notify(glib::clone!(
             #[strong(rename_to = this)]
@@ -1338,6 +1459,7 @@ impl MarkupWindow {
         handler.set(Some(id));
     }
 
+    /// Reads the clipboard's image asynchronously and opens it.
     fn read_clipboard(&self) {
         let clipboard = self.window.clipboard();
         let this = self.clone();
@@ -1350,6 +1472,7 @@ impl MarkupWindow {
         });
     }
 
+    /// Opens `file`: a PDF (every page) or any image gdk-pixbuf/GDK can read.
     pub fn load_file(&self, file: &gio::File) {
         if crate::pdf::is_pdf(file) {
             self.load_pdf(file);
@@ -1385,19 +1508,28 @@ impl MarkupWindow {
     }
 }
 
+/// A relative page move, for the keyboard shortcuts.
 #[derive(Clone, Copy)]
 enum PageStep {
+    /// Page Up, Alt+Up.
     Previous,
+    /// Page Down, Alt+Down.
     Next,
+    /// Home.
     First,
+    /// End.
     Last,
 }
 
+/// The file's base name, for the title and suggested save names.
 fn file_name(file: &gio::File) -> Option<String> {
     file.basename().map(|n| n.to_string_lossy().to_string())
 }
 
+// The pending top-bar activation token. GTK is single-threaded, so a
+// thread-local on the main thread is enough.
 thread_local! {
+    /// Taken (and so used at most once) by [`MarkupWindow::present`].
     static ACTIVATION_TOKEN: Cell<Option<String>> = const { Cell::new(None) };
 }
 
@@ -1422,6 +1554,8 @@ pub async fn release_activation_token(app: &adw::Application, token: Option<Stri
         glib::g_debug!("pygoscribe", "no activation token to release");
         return;
     };
+    // launch::complete does blocking Wayland I/O, so run it on a worker
+    // thread rather than stall the main loop.
     let t = token.clone();
     match gio::spawn_blocking(move || crate::launch::complete(&t)).await {
         Ok(Ok(())) => {
@@ -1432,6 +1566,8 @@ pub async fn release_activation_token(app: &adw::Application, token: Option<Stri
         Err(_) => glib::g_debug!("pygoscribe", "gtk_shell launch completion panicked"),
     }
     glib::g_debug!("pygoscribe", "releasing activation token {token}");
+    // Fallback: a 1×1, undecorated, transparent window that presents the
+    // token, waits to be activated (which completes the launch), and closes.
     let win = gtk::Window::builder()
         .application(app)
         .decorated(false)
@@ -1460,6 +1596,8 @@ pub async fn release_activation_token(app: &adw::Application, token: Option<Stri
         Ok(_) => glib::g_debug!("pygoscribe", "token window activated"),
         Err(_) => glib::g_debug!("pygoscribe", "token window not activated within 1.5 s"),
     }
+    // A short grace period so the compositor has processed the activation
+    // before the window disappears.
     glib::timeout_future(std::time::Duration::from_millis(200)).await;
     win.destroy();
 }
@@ -1469,6 +1607,8 @@ pub async fn release_activation_token(app: &adw::Application, token: Option<Stri
 /// is needed to use the top bar's activation token, and it's where the image
 /// goes anyway. Cancelling closes that new window again.
 pub fn choose_and_open(app: &adw::Application, target: Option<&MarkupWindow>) {
+    // Every format gdk-pixbuf has a loader for, plus PDF (by type and by
+    // name, since some file systems don't report MIME types).
     let filter = gtk::FileFilter::new();
     filter.set_name(Some("Images and PDFs"));
     filter.add_pixbuf_formats();

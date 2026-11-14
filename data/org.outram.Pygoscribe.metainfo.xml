@@ -36,6 +36,11 @@
   </replaces>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.1.18" date="2026-11-14">
+      <description>
+        <p>Fully commented source code, and a README that explains building Pygoscribe, its .deb and its Flatpak from a clean Ubuntu install.</p>
+      </description>
+    </release>
     <release version="0.1.17" date="2026-11-14">
       <description>
         <p>Tidier documentation: the README and the app's description now describe Pygoscribe's tools on their own terms.</p>

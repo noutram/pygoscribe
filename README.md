@@ -43,53 +43,100 @@ civil liability.
 
 ## Install
 
-### Build everything with one script
-
-```sh
-./install.sh                    # tests, release build, dist/*.deb and dist/pygoscribe.flatpak
-./install.sh --install flatpak  # ...and install the Flatpak for your user
-./install.sh --install deb      # ...and install the .deb (asks for sudo)
-```
-
-`--skip-deb` and `--skip-flatpak` build only one package. The script installs
-`cargo-deb` and the Flatpak SDK the first time it needs them. If
-`flatpak-builder` isn't installed, it skips the Flatpak with a warning.
-The sections below give the same steps by hand.
-
 Ready-made packages (`.deb` and `.flatpak`) are attached to each release on
 the project's [GitHub releases page](https://github.com/noutram/pygoscribe/releases), together with the complete source for them (see
-[License](#license)). To make them for a new tag, run
-`scripts/release.sh v<version>` (see `docs/PROJECT_CONTEXT.md`, Releasing).
-
-`install.sh` also checks licensing before it builds: `cargo deny check
-licenses` (every crate's license must be on the allow-list in `deny.toml`),
-`reuse lint` (every file carries license information) and `cargo about`
-(regenerates `THIRD-PARTY-LICENSES.md`). It installs `cargo-deny` and
-`cargo-about` the first time; `reuse` comes from `pipx install reuse` or
-`uv tool install reuse`.
-
-### .deb (recommended on Ubuntu)
-
-Ubuntu 24.04 or later:
-
-```sh
-sudo apt install build-essential libgtk-4-dev libadwaita-1-dev libpoppler-glib-dev
-cargo install cargo-deb        # once
-cargo deb
-sudo apt install ./target/debian/pygoscribe_0.1.2-1_amd64.deb
-```
-
-This installs `pygoscribe` in `/usr/bin` with its app icon, menu entry and
-AppStream data. Remove it with `sudo apt remove pygoscribe`.
+[License](#license)). Install the .deb with `sudo apt install
+./pygoscribe_<version>-1_amd64.deb`, or the Flatpak with `flatpak install
+--user pygoscribe.flatpak`.
 
 The .deb is the better fit for Ubuntu: the app uses the system GTK and
 libadwaita, mail apps get the attachment directly, and nothing extra needs
 installing.
 
-### Flatpak
+## Building from a clean Ubuntu install
+
+These steps start from a fresh Ubuntu 26.04 LTS and end with the app
+running, a `.deb` and a `.flatpak`. They were checked in a clean
+`ubuntu:26.04` container. Ubuntu 24.04 LTS also works, because it has
+GTK 4.14 and libadwaita 1.5, the oldest versions Pygoscribe supports.
+
+### 1. Build tools and libraries
 
 ```sh
-flatpak install --user flathub org.gnome.Sdk//50 org.freedesktop.Sdk.Extension.rust-stable//25.08
+sudo apt update
+sudo apt install build-essential pkg-config curl git \
+    libgtk-4-dev libadwaita-1-dev libpoppler-glib-dev
+```
+
+- `build-essential` and `pkg-config` provide the C compiler and linker
+  that Rust uses, and let the Rust crates find the system libraries.
+- `libgtk-4-dev` brings in GTK 4, GLib (including `glib-compile-resources`,
+  which bundles the app's icons), Cairo, Pango and gdk-pixbuf.
+- `libadwaita-1-dev` is libadwaita, and `libpoppler-glib-dev` is Poppler,
+  which opens and renders PDFs.
+- `curl` fetches the Rust installer and `git` fetches the source.
+
+Everything else (the Wayland client, D-Bus for the top-bar icon) is pure
+Rust and comes from crates.io.
+
+### 2. Rust
+
+Pygoscribe uses the Rust 2024 edition and needs a recent stable compiler
+(1.88 or later). Ubuntu's `rustc` package may be older, so install Rust with
+[rustup](https://rustup.rs):
+
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"     # or open a new terminal
+```
+
+Keep it current later with `rustup update`.
+
+### 3. Get the source and build
+
+```sh
+git clone https://github.com/noutram/pygoscribe.git
+cd pygoscribe
+cargo build --release --locked
+cargo test --release --locked
+./target/release/pygoscribe --window
+```
+
+On Ubuntu 24.04, run the tests one at a time (`cargo test --release
+--locked -- --test-threads=1`): run in parallel there, the tests that draw
+text and PDFs can crash in the older system libraries. The app itself is
+unaffected, since it draws on one thread.
+
+`cargo run --release` builds and runs in one step. If Pygoscribe is already
+running in the top bar, quit it first (`pkill pygoscribe`): otherwise the
+new build hands the request to the running copy.
+
+Instead of `git clone`, you can unpack `pygoscribe-<version>-src.tar.xz`
+from a release page. It includes every crate in `vendor/`, so it builds
+without a network connection: `cargo build --release --offline --locked`.
+
+### 4. The .deb
+
+```sh
+cargo install --locked cargo-deb        # once
+cargo deb --locked
+sudo apt install ./target/debian/pygoscribe_*_amd64.deb
+```
+
+This installs `pygoscribe` in `/usr/bin` with its app icon, menu entry and
+AppStream data. Remove it with `sudo apt remove pygoscribe`.
+
+### 5. The Flatpak
+
+The Flatpak is built against the GNOME 50 runtime from Flathub, with Rust
+from Flathub's rust-stable SDK extension. It also builds its own copy of
+Poppler, which the GNOME runtime doesn't include.
+
+```sh
+sudo apt install flatpak flatpak-builder
+flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+flatpak install --user flathub org.gnome.Platform//50 org.gnome.Sdk//50 \
+    org.freedesktop.Sdk.Extension.rust-stable//25.08
 flatpak-builder --user --install --force-clean build-dir \
     build-aux/flatpak/org.outram.Pygoscribe.json
 flatpak run org.outram.Pygoscribe
@@ -112,11 +159,38 @@ Save uses the file chooser, Open With… uses the Open URI portal and Email…
 uses the Email portal, which attaches the image in any mail app the desktop
 supports. The top-bar icon talks to the AppIndicator extension directly.
 
-### Run from source
+### Everything with one script
+
+Once steps 1 and 2 are done, `install.sh` runs the tests and builds both
+packages into `dist/`:
 
 ```sh
-cargo run --release
+sudo apt install pipx flatpak flatpak-builder   # pipx for reuse, below
+pipx install reuse
+./install.sh                    # tests, release build, dist/*.deb and dist/pygoscribe.flatpak
+./install.sh --install flatpak  # ...and install the Flatpak for your user
+./install.sh --install deb      # ...and install the .deb (asks for sudo)
 ```
+
+`--skip-deb` and `--skip-flatpak` build only one package. The script installs
+`cargo-deb`, `cargo-deny`, `cargo-about` and the Flatpak SDK the first time it
+needs them. If `flatpak-builder` isn't installed, it skips the Flatpak with a
+warning.
+
+Before building, `install.sh` checks licensing: `cargo deny check licenses`
+(every crate's license must be on the allow-list in `deny.toml`), `reuse
+lint` (every file carries license information) and `cargo about`
+(regenerates `THIRD-PARTY-LICENSES.md`). `reuse` can also come from `uv tool
+install reuse`.
+
+To make the packages for a new release, run `scripts/release.sh v<version>`
+(see `docs/PROJECT_CONTEXT.md`, Releasing).
+
+### Reading the code
+
+Every source file in `src/` starts with a module comment explaining its part
+of the app, and `src/main.rs` has a map of the modules. `cargo doc
+--document-private-items --open` renders all of it as browsable docs.
 
 ## Usage
 

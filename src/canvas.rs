@@ -12,6 +12,41 @@
 
 //! The interactive markup canvas: draws the document and turns pointer input
 //! into shapes, selection, moves, resizes and crops.
+//!
+//! # Structure
+//!
+//! [`Canvas`] is a cheap-to-clone handle (`Rc<Inner>`) around a
+//! `gtk::DrawingArea` with two overlay scrollbars. All mutable state is in
+//! [`State`], behind a `RefCell`. GTK calls back into the canvas from signal
+//! handlers, which can nest (a redraw while a drag is being handled, a
+//! callback into the window that calls the canvas again), so methods take
+//! the borrow in a short block, drop it, and only then emit callbacks or
+//! queue a redraw. That pattern is used throughout and is what keeps the
+//! `RefCell` from panicking.
+//!
+//! # Coordinates
+//!
+//! Marks live in image pixels. The view maps them to the widget as
+//! `screen = image * scale + offset` (see [`crate::view`]), recomputed on
+//! every draw. Pointer events arrive in screen pixels and are turned back
+//! into image pixels before hit testing. "100 %" is `scale == unit`: one image
+//! pixel per screen pixel for a picture, or a PDF page at its printed size.
+//!
+//! # Editing and undo
+//!
+//! Every operation clones the document into `before`, changes it, and calls
+//! `History::record(before, &doc)`, which keeps the step only if something
+//! changed. A drag keeps its `before` in [`Drag`] until the button is
+//! released, so a whole drag is one undo step. Rapid restyles of one mark
+//! (dragging the opacity slider) are merged into one step (`restyle`). While
+//! a text editor is open, the edit records one step for everything done in it.
+//!
+//! # Sharp PDF zoom
+//!
+//! A PDF page is rendered once at 144 dpi for editing. When zoomed in past
+//! that, the canvas waits until the view stops moving ([`HIRES_DELAY`]) and
+//! then renders just the visible region again with Poppler at the screen's
+//! resolution ([`Hires`]), drawing it over the blurry base image.
 
 use crate::document::{Document, HAlign, History, Kind, Point, Rect, Rgba, Shape, Style, Tool, VAlign};
 use crate::pages::PageState;
@@ -24,8 +59,10 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-const HANDLE: f64 = 5.0; // half-size in screen pixels
-const HIT_TOL: f64 = 6.0; // screen pixels
+/// Half the size of a selection handle, in screen pixels.
+const HANDLE: f64 = 5.0;
+/// How near (in screen pixels) a click must be to count as on a mark.
+const HIT_TOL: f64 = 6.0;
 /// How far an arrow key scrolls a zoomed-in page, in screen pixels.
 const ARROW_STEP: f64 = 40.0;
 /// Sharp PDF rendering is skipped past this many device pixels a side.
@@ -35,10 +72,12 @@ const SCALE_MAX: i32 = 16384;
 /// Wait this long after the view stops changing before re-rendering a PDF
 /// page sharply.
 const HIRES_DELAY: Duration = Duration::from_millis(120);
+/// The selection colour: GNOME's blue accent.
 const ACCENT: Rgba = Rgba::new(0.208, 0.518, 0.894, 1.0);
-/// Shift+Alt+drag snaps rotation to steps of this size.
+/// Restyles of the same mark less than this far apart share one undo step.
 const RESTYLE_MERGE: Duration = Duration::from_millis(1000);
-const SNAP: f64 = std::f64::consts::PI / 12.0; // 15°
+/// Shift+Alt+drag snaps rotation to steps of this size (15°).
+const SNAP: f64 = std::f64::consts::PI / 12.0;
 
 /// Whether a drag with these modifiers should rotate. Alt is the documented
 /// key. GNOME moves windows with Super+drag by default, but it can be set to
@@ -49,14 +88,24 @@ fn rotate_modifier(mods: gdk::ModifierType) -> bool {
     mods.intersects(gdk::ModifierType::ALT_MASK | gdk::ModifierType::SUPER_MASK | gdk::ModifierType::META_MASK)
 }
 
+/// What the current primary-button drag is doing. Variants that change the
+/// document carry `before`, the document when the drag began, to record as
+/// one undo step when it ends, and `orig`, the mark as it was, so each
+/// motion event recomputes from the start (no accumulated error).
 enum Drag {
+    /// No drag in progress.
     None,
+    /// Drawing new mark `idx` (already pushed onto the document), from
+    /// `start` in image pixels.
     Create { idx: usize, start: Point, before: Document },
+    /// Moving mark `idx`; `start` is where the pointer went down.
     Move { idx: usize, orig: Shape, start: Point, before: Document },
+    /// Dragging handle `handle` of mark `idx` (see `Shape::handles`).
     Resize { idx: usize, handle: usize, orig: Shape, before: Document },
     /// Alt+drag: turn the mark about `center` by the pointer's change of
     /// angle since `start`.
     Rotate { idx: usize, orig: Shape, center: Point, start: Point, before: Document },
+    /// Choosing a crop rectangle from `start`; the result is `pending_crop`.
     Crop { start: Point },
     /// Space+drag: move the view. `offset` is the view's offset and `at` the
     /// pointer (screen) when the drag began.
@@ -66,21 +115,34 @@ enum Drag {
     EditText { idx: usize, before: Document },
 }
 
+/// Everything the canvas knows, behind one `RefCell` (see the module docs).
 struct State {
+    /// The page's image as opened (or rendered from the PDF). `None` while
+    /// the window is empty. Scale to Visible Size puts its result in
+    /// `doc.image`, which takes precedence (see `current_image`).
     image: Option<ImageSurface>,
+    /// The current page's marks and crop.
     doc: Document,
+    /// The current page's undo and redo stacks.
     history: History,
+    /// The tool chosen in the tool bar.
     tool: Tool,
+    /// The style for new marks.
     style: Style,
+    /// Index of the selected mark in `doc.shapes`.
     selected: Option<usize>,
     /// The last restyle of a selected mark: (mark, when, undo depth after it).
     /// Quick successive restyles of one mark (dragging the opacity slider)
     /// make one undo step.
     restyle: Option<(usize, Instant, usize)>,
+    /// The drag in progress.
     drag: Drag,
+    /// A crop rectangle drawn but not yet applied (Enter or double-click
+    /// applies it, Esc drops it).
     pending_crop: Option<Rect>,
-    // View transform from the last draw: screen = image * scale + offset.
+    /// Screen pixels per image pixel, from the last draw.
     scale: f64,
+    /// Screen position of image point (0, 0), from the last draw.
     offset: Point,
     /// Zoom to fit (the scale follows the window) rather than a set zoom.
     fit: bool,
@@ -109,41 +171,62 @@ struct State {
 /// Part of a PDF page rendered sharply for a zoomed-in view: `region` (image
 /// pixels) at `k` device pixels per image pixel.
 struct Hires {
+    /// Device pixels per image pixel it was rendered at.
     k: f64,
+    /// The part of the page it covers, in image pixels.
     region: Rect,
+    /// The rendered pixels.
     surface: ImageSurface,
 }
 
+/// A callback with no arguments.
 type Callback = Box<dyn Fn()>;
 
 /// An open text editor for one text mark.
 struct Editor {
+    /// The mark being edited.
     idx: usize,
     /// The text when editing began, put back if the edit is cancelled.
     original: String,
     /// The document to record for undo when editing finishes.
     before: Document,
+    /// The popover holding the text view and alignment buttons.
     popover: gtk::Popover,
 }
 
+/// The canvas's widgets, state and callbacks to the window.
 struct Inner {
+    /// Where the page is drawn and input arrives.
     area: gtk::DrawingArea,
     /// The canvas with its scrollbars over it.
     overlay: gtk::Overlay,
+    /// Horizontal scrollbar, shown only when the page overflows.
     hbar: gtk::Scrollbar,
+    /// Vertical scrollbar, likewise.
     vbar: gtk::Scrollbar,
     /// Set while the scrollbars are updated from the view, so their change
     /// signals don't feed back.
     syncing: Cell<bool>,
+    /// A scrollbar update is already queued for after this draw.
     sync_queued: Cell<bool>,
+    /// The pending sharp-PDF render, restarted whenever the view moves.
     hires_timer: RefCell<Option<glib::SourceId>>,
+    /// The zoom last reported to `on_zoom`, so it only fires on change.
     last_percent: Cell<f64>,
+    /// Told the zoom (percent) when it changes: updates the header label.
     on_zoom: RefCell<Option<Box<dyn Fn(f64)>>>,
+    /// See [`State`].
     state: RefCell<State>,
+    /// The open text editor, if any.
     editor: RefCell<Option<Editor>>,
+    /// Told the selected mark's style (or `None`) when the selection changes,
+    /// so the tool bar can show it.
     on_selection: RefCell<Option<Box<dyn Fn(Option<Style>)>>>,
+    /// Told when undo/redo availability may have changed.
     on_history: RefCell<Option<Callback>>,
+    /// Shows a short hint (a toast) to the user.
     on_hint: RefCell<Option<Box<dyn Fn(&str)>>>,
+    /// Opens the context menu (see [`Canvas::connect_context_menu`]).
     on_context: RefCell<Option<Box<dyn Fn(Point, Option<MarkInfo>)>>>,
 }
 
@@ -159,17 +242,22 @@ pub struct MarkInfo {
     pub has_text: bool,
     /// A line or arrow: its text goes above or below.
     pub is_line: bool,
+    /// Its text's horizontal alignment.
     pub halign: HAlign,
+    /// Its text's vertical alignment (above/below for a line).
     pub valign: VAlign,
-    /// Whether it can move up (isn't already the top mark) or down.
+    /// Whether it can move up (isn't already the top mark).
     pub can_raise: bool,
+    /// Whether it can move down (isn't already the bottom mark).
     pub can_lower: bool,
 }
 
+/// A handle to the markup canvas; clones share the same canvas.
 #[derive(Clone)]
 pub struct Canvas(Rc<Inner>);
 
 impl Canvas {
+    /// An empty canvas with the Select tool, ready for `swap_page`.
     pub fn new() -> Self {
         let area = gtk::DrawingArea::builder().hexpand(true).vexpand(true).focusable(true).build();
         let hbar = gtk::Scrollbar::builder()
@@ -182,6 +270,9 @@ impl Canvas {
             .halign(gtk::Align::End)
             .visible(false)
             .build();
+        // Scrollbars float over the canvas (like GTK's overlay scrolling)
+        // rather than taking space from it, so showing them doesn't change
+        // the viewport and re-fit the page.
         let overlay = gtk::Overlay::builder().child(&area).build();
         overlay.add_overlay(&hbar);
         overlay.add_overlay(&vbar);
@@ -241,14 +332,18 @@ impl Canvas {
         &self.0.overlay
     }
 
+    /// Borrows the state mutably. Keep the borrow short (see module docs).
     fn st(&self) -> std::cell::RefMut<'_, State> {
         self.0.state.borrow_mut()
     }
 
+    /// Called with the selected mark's style, or `None` when nothing is
+    /// selected.
     pub fn connect_selection_changed(&self, f: impl Fn(Option<Style>) + 'static) {
         *self.0.on_selection.borrow_mut() = Some(Box::new(f));
     }
 
+    /// Called whenever undo or redo may have become (un)available.
     pub fn connect_history_changed(&self, f: impl Fn() + 'static) {
         *self.0.on_history.borrow_mut() = Some(Box::new(f));
     }
@@ -293,6 +388,8 @@ impl Canvas {
             let before = st.doc.clone();
             let j = st.doc.restack(i, front);
             st.selected = Some(j);
+            // Split the borrow: record needs `history` mutably and `doc`
+            // immutably at the same time.
             let State { history, doc, .. } = &mut *st;
             history.record(before, doc);
         }
@@ -359,10 +456,13 @@ impl Canvas {
         }
     }
 
+    /// Called with a short message to show the user (as a toast).
     pub fn connect_hint(&self, f: impl Fn(&str) + 'static) {
         *self.0.on_hint.borrow_mut() = Some(Box::new(f));
     }
 
+    /// Tells the window about the selection. The state borrow is dropped
+    /// before the callback runs, since it may call back into the canvas.
     fn emit_selection(&self) {
         let style = {
             let st = self.0.state.borrow();
@@ -373,18 +473,21 @@ impl Canvas {
         }
     }
 
+    /// Tells the window undo/redo may have changed.
     fn emit_history(&self) {
         if let Some(f) = &*self.0.on_history.borrow() {
             f();
         }
     }
 
+    /// Shows `msg` through the hint callback.
     fn hint(&self, msg: &str) {
         if let Some(f) = &*self.0.on_hint.borrow() {
             f(msg);
         }
     }
 
+    /// Schedules a redraw for the next frame.
     fn redraw(&self) {
         self.0.area.queue_draw();
     }
@@ -431,6 +534,8 @@ impl Canvas {
         self.apply_crop();
     }
 
+    /// Switches tool. Leaving Crop applies a pending crop; any tool but
+    /// Select drops the selection.
     pub fn set_tool(&self, tool: Tool) {
         self.finish_edit(false);
         let had_crop = {
@@ -468,6 +573,7 @@ impl Canvas {
             let mut st = self.st();
             st.style = style.clone();
             let before = st.doc.clone();
+            // fit_text: a new font or size changes a text box's size.
             if let Some(i) = st.selected {
                 let shape = &mut st.doc.shapes[i];
                 shape.style = style;
@@ -475,6 +581,8 @@ impl Canvas {
             }
             // While editing, the edit's own undo step covers the restyle.
             if !editing {
+                // Merge into the previous step if it was a restyle of this
+                // same mark, recent, and nothing else has been recorded since.
                 let merge = match (st.selected, st.restyle) {
                     (Some(i), Some((j, at, depth))) => {
                         i == j && at.elapsed() < RESTYLE_MERGE && st.history.depth() == depth
@@ -491,6 +599,7 @@ impl Canvas {
                         st.restyle = st.selected.map(|i| (i, Instant::now(), st.history.depth()));
                     }
                 } else if let Some(r) = &mut st.restyle {
+                    // Extend the merge window from this restyle.
                     r.1 = Instant::now();
                 }
             }
@@ -502,6 +611,9 @@ impl Canvas {
         }
     }
 
+    /// Undoes the last step on this page. If the step changes the image's
+    /// size (Scale to Visible Size), the zoom is adjusted so the page stays
+    /// the same size on screen.
     pub fn undo(&self) {
         self.finish_edit(false);
         let ok = {
@@ -521,6 +633,7 @@ impl Canvas {
         }
     }
 
+    /// Redoes the last undone step on this page (see [`Self::undo`]).
     pub fn redo(&self) {
         self.finish_edit(false);
         let ok = {
@@ -539,14 +652,17 @@ impl Canvas {
         }
     }
 
+    /// Whether this page has anything to undo.
     pub fn can_undo(&self) -> bool {
         self.0.state.borrow().history.can_undo()
     }
 
+    /// Whether this page has anything to redo.
     pub fn can_redo(&self) -> bool {
         self.0.state.borrow().history.can_redo()
     }
 
+    /// Removes the selected mark, as one undo step.
     pub fn delete_selected(&self) {
         {
             let mut st = self.st();
@@ -561,6 +677,9 @@ impl Canvas {
         self.redraw();
     }
 
+    /// Turns the pending crop rectangle into the document's crop (as one
+    /// undo step). The rectangle is limited to what is visible now, so a crop
+    /// can only make the image smaller; one under 2 × 2 pixels is ignored.
     pub fn apply_crop(&self) {
         {
             let mut st = self.st();
@@ -596,6 +715,8 @@ impl Canvas {
         let size = {
             let mut st = self.st();
             let Some(image) = current_image(&st).cloned() else { return Err("There is no image to scale".into()) };
+            // k is the current zoom as a fraction of actual size: the image
+            // is resampled by k so that 100 % afterwards looks like now.
             let k = st.scale / st.unit;
             let (w0, h0) = (f64::from(image.width()), f64::from(image.height()));
             let (w, h) = ((w0 * k).round().max(1.0), (h0 * k).round().max(1.0));
@@ -611,6 +732,8 @@ impl Canvas {
                 let cr = Context::new(&out).map_err(err)?;
                 cr.scale(w / w0, h / h0);
                 cr.set_source_surface(&image, 0.0, 0.0).map_err(err)?;
+                // Best filtering for a good downscale; Source copies alpha
+                // as is rather than blending onto the empty surface.
                 cr.source().set_filter(cairo::Filter::Best);
                 cr.set_operator(cairo::Operator::Source);
                 cr.paint().map_err(err)?;
@@ -618,6 +741,7 @@ impl Canvas {
             out.flush();
             let before = st.doc.clone();
             st.doc.scale(k);
+            // Re-fit text boxes: font metrics don't scale exactly linearly.
             for shape in &mut st.doc.shapes {
                 render::fit_text(shape);
             }
@@ -684,6 +808,7 @@ impl Canvas {
                 st.viewport = (f64::from(self.0.area.width()), f64::from(self.0.area.height()));
             }
             let a = anchor.unwrap_or((st.viewport.0 / 2.0, st.viewport.1 / 2.0));
+            // The image point under the anchor now, to keep there.
             let p = ((a.0 - st.offset.0) / st.scale, (a.1 - st.offset.1) / st.scale);
             let unit = st.unit;
             let s = scale.clamp(view::MIN_PERCENT / 100.0 * unit, view::MAX_PERCENT / 100.0 * unit);
@@ -695,15 +820,18 @@ impl Canvas {
         self.redraw();
     }
 
+    /// Zooms to `percent` of actual size about the middle of the view.
     fn zoom_to_percent(&self, percent: f64) {
         let unit = self.0.state.borrow().unit;
         self.zoom_to(percent / 100.0 * unit, None);
     }
 
+    /// Zooms in to the next step (see [`view::STEPS`]).
     pub fn zoom_in(&self) {
         self.zoom_to_percent(view::step_in(self.zoom_percent()));
     }
 
+    /// Zooms out to the previous step.
     pub fn zoom_out(&self) {
         self.zoom_to_percent(view::step_out(self.zoom_percent()));
     }
@@ -738,10 +866,14 @@ impl Canvas {
         true
     }
 
+    /// Device pixels per logical pixel of the window's surface (2 on a
+    /// 200 % HiDPI screen; fractional with fractional scaling).
     fn device_scale(&self) -> f64 {
         self.0.area.native().and_then(|n| n.surface()).map_or(1.0, |s| s.scale())
     }
 
+    /// Schedules [`Self::sync_view`] once, after the current draw. Changing
+    /// widgets from inside a draw function isn't allowed, hence the idle.
     fn queue_sync(&self) {
         if self.0.sync_queued.replace(true) {
             return;
@@ -781,6 +913,8 @@ impl Canvas {
         for (bar, (show, (upper, page, value))) in [(&self.0.hbar, bars[0]), (&self.0.vbar, bars[1])] {
             bar.set_visible(show);
             if show {
+                // (value, lower, upper, step, page step, page size): arrow
+                // clicks move 10 % of a page, trough clicks 90 %.
                 bar.adjustment().configure(value, 0.0, upper, page * 0.1, page * 0.9, page);
             }
         }
@@ -793,6 +927,7 @@ impl Canvas {
             }
         }
 
+        // Keep the text editor's popover pointing at its mark as the view moves.
         if let (Some(ed), Some(rect)) = (&*self.0.editor.borrow(), editor_rect)
             && ed.popover.pointing_to().1 != rect
         {
@@ -814,6 +949,8 @@ impl Canvas {
                 st.hires = None;
                 false
             } else {
+                // Stale unless the existing render is at this zoom and
+                // covers everything now in view.
                 match view_rect(&st).intersect(&vis) {
                     None => false,
                     Some(wanted) => !st
@@ -826,6 +963,8 @@ impl Canvas {
         if !stale {
             return;
         }
+        // Debounce: restart the timer, so rendering happens only once the
+        // view has been still for HIRES_DELAY (not on every scroll step).
         if let Some(id) = self.0.hires_timer.borrow_mut().take() {
             id.remove();
         }
@@ -852,6 +991,8 @@ impl Canvas {
             if k <= 1.01 {
                 return;
             }
+            // Render 10 % extra on each side, so small scrolls don't need a
+            // new render straight away.
             let v = view_rect(&st);
             let pad = 0.1;
             let padded = Rect { x: v.x - v.w * pad, y: v.y - v.h * pad, w: v.w * (1.0 + 2.0 * pad), h: v.h * (1.0 + 2.0 * pad) };
@@ -866,9 +1007,12 @@ impl Canvas {
             (painter, r, k)
         };
         let (pw, ph) = ((region.w * k).ceil() as i32, (region.h * k).ceil() as i32);
+        // Very deep zoom on a big window: skip rather than allocate a huge
+        // surface; the blurry base image still shows.
         if pw <= 0 || ph <= 0 || pw > HIRES_MAX || ph > HIRES_MAX {
             return;
         }
+        // Rgb24: a PDF page on white is opaque, so no alpha is needed.
         let Ok(surface) = ImageSurface::create(cairo::Format::Rgb24, pw, ph) else { return };
         {
             let Ok(cr) = Context::new(&surface) else { return };
@@ -883,6 +1027,8 @@ impl Canvas {
         self.redraw();
     }
 
+    /// Connects the scrollbars, scroll wheel/touchpad, middle-drag and pinch
+    /// gestures that move and zoom the view.
     fn setup_view(&self) {
         // Scrollbars move the view.
         for horizontal in [true, false] {
@@ -916,8 +1062,12 @@ impl Canvas {
             let Some(i) = weak.upgrade() else { return glib::Propagation::Proceed };
             let c = Canvas(i);
             let mods = ctl.current_event_state();
+            // A mouse wheel reports clicks (Wheel); a touchpad reports
+            // smooth pixel deltas (Surface), which need different factors.
             let wheel = ctl.unit() == gdk::ScrollUnit::Wheel;
             if mods.contains(gdk::ModifierType::CONTROL_MASK) {
+                // Wheel: 20 % per click. Touchpad: exponential in the
+                // distance, so zooming in and back out is symmetric.
                 let factor = if wheel { 1.2f64.powf(-dy) } else { (-dy * 0.01).exp() };
                 let (scale, pointer) = {
                     let st = c.0.state.borrow();
@@ -927,9 +1077,11 @@ impl Canvas {
                 return glib::Propagation::Stop;
             }
             let (mut dx, mut dy) = if wheel { (dx * 48.0, dy * 48.0) } else { (dx, dy) };
+            // Shift+wheel scrolls sideways (mice have no horizontal wheel).
             if wheel && mods.contains(gdk::ModifierType::SHIFT_MASK) && dx == 0.0 {
                 std::mem::swap(&mut dx, &mut dy);
             }
+            // When the page fits, let the scroll go on to parent widgets.
             if c.pan_by(dx, dy) { glib::Propagation::Stop } else { glib::Propagation::Proceed }
         });
         self.0.area.add_controller(scroll);
@@ -991,6 +1143,8 @@ impl Canvas {
 
     // ----- drawing ----------------------------------------------------------
 
+    /// Installs the draw function. It holds a weak reference so the drawing
+    /// area doesn't keep the canvas alive in a cycle.
     fn setup_drawing(&self) {
         let weak = Rc::downgrade(&self.0);
         self.0.area.set_draw_func(move |_, cr, w, h| {
@@ -1000,6 +1154,9 @@ impl Canvas {
         });
     }
 
+    /// Draws one frame: the page with its marks, then the selection and crop
+    /// overlays, which are not part of the document. Also records the
+    /// viewport size and re-lays out the view (fit-to-window follows it).
     fn draw(&self, cr: &Context, w: f64, h: f64) {
         let mut st = self.st();
         let Some(image) = current_image(&st).cloned() else { return };
@@ -1024,6 +1181,8 @@ impl Canvas {
         let background = move |cr: &Context| {
             render::paint_image(cr, &image);
             if let Some((surface, r, k)) = &hires {
+                // The sharp render is k device pixels per image pixel;
+                // scale by 1/k to put it back in image pixels.
                 let _ = cr.save();
                 cr.rectangle(r.x, r.y, r.w, r.h);
                 cr.clip();
@@ -1042,6 +1201,7 @@ impl Canvas {
         let _ = cr.paint();
         let _ = cr.restore();
 
+        // Overlays, outside the clip so handles at the edge show in full.
         let _ = cr.save();
         cr.translate(offset.0, offset.1);
         cr.scale(scale, scale);
@@ -1059,11 +1219,14 @@ impl Canvas {
 
     // ----- input ------------------------------------------------------------
 
+    /// Converts a widget (screen) point to image pixels.
     fn to_image(&self, x: f64, y: f64) -> Point {
         let st = self.0.state.borrow();
         ((x - st.offset.0) / st.scale, (y - st.offset.1) / st.scale)
     }
 
+    /// Connects the pointer, click, keyboard, context-menu and motion
+    /// controllers. Primary-button drags drive the tools.
     fn setup_input(&self) {
         let drag = gtk::GestureDrag::new();
         drag.set_button(gdk::BUTTON_PRIMARY);
@@ -1109,6 +1272,7 @@ impl Canvas {
         let weak = Rc::downgrade(&self.0);
         menu_click.connect_pressed(move |g, _, x, y| {
             if let Some(i) = weak.upgrade() {
+                // Claim the press so the primary drag gesture doesn't see it.
                 g.set_state(gtk::EventSequenceState::Claimed);
                 let c = Canvas(i);
                 c.0.area.grab_focus();
@@ -1135,6 +1299,8 @@ impl Canvas {
             match key {
                 gdk::Key::Menu => c.context_menu(None),
                 gdk::Key::space if mods.is_empty() => {
+                    // Key repeat sends Space again and again while held;
+                    // only the first press changes the cursor.
                     let fresh = {
                         let mut st = c.st();
                         let fresh = !st.space && st.image.is_some();
@@ -1248,6 +1414,8 @@ impl Canvas {
         self.0.area.set_cursor_from_name(Some(name));
     }
 
+    /// The cursor name for widget point (`x`, `y`): what a press there would
+    /// do, in the same order of precedence as [`Self::drag_begin`].
     fn cursor_at(&self, x: f64, y: f64, mods: gdk::ModifierType) -> &'static str {
         let p = self.to_image(x, y);
         let st = self.0.state.borrow();
@@ -1271,7 +1439,11 @@ impl Canvas {
         }
     }
 
+    /// A primary-button press: decides what the drag will do, in order of
+    /// precedence: Space-pan, double-click text edit, Alt-rotate, resizing
+    /// the selected mark by a handle, then the current tool.
     fn drag_begin(&self, x: f64, y: f64, mods: gdk::ModifierType) {
+        // A press anywhere ends a text edit (clicking away keeps the text).
         self.finish_edit(false);
         let p = self.to_image(x, y);
         let mut st = self.st();
@@ -1365,6 +1537,8 @@ impl Canvas {
                     }
                     return;
                 }
+                // A new, empty text mark, edited straight away when the button
+                // is released. If it is left empty, finish_text_edit removes it.
                 let mut shape = Shape::new(Kind::Text(String::new()), p, st.style.clone());
                 render::fit_text(&mut shape);
                 st.doc.shapes.push(shape);
@@ -1386,6 +1560,8 @@ impl Canvas {
                     Tool::Loupe => Kind::Loupe { zoom: 2.0 },
                     _ => unreachable!(),
                 };
+                // The mark is added now and grows with the drag; drag_end
+                // removes it again if it stayed tiny (a stray click).
                 let mut style = st.style.clone();
                 if tool == Tool::Highlighter {
                     // Highlights start yellow; recolour by selecting one.
@@ -1399,6 +1575,8 @@ impl Canvas {
         }
     }
 
+    /// Pointer motion during a primary drag: updates the mark (or crop, or
+    /// view) from the drag's starting state to follow the pointer.
     fn drag_update(&self, x: f64, y: f64, mods: gdk::ModifierType) {
         let p = self.to_image(x, y);
         let mut st = self.st();
@@ -1409,6 +1587,8 @@ impl Canvas {
             self.redraw();
             return;
         }
+        // Split the borrow so the drag, the document and the crop can be
+        // changed together.
         let State { drag, doc, pending_crop, .. } = &mut *st;
         match drag {
             Drag::None | Drag::EditText { .. } | Drag::Pan { .. } => return,
@@ -1417,6 +1597,7 @@ impl Canvas {
                 match &mut shape.kind {
                     Kind::Pen(pts) | Kind::Highlighter(pts) => pts.push(p),
                     Kind::Loupe { .. } => {
+                        // Keep it square, growing toward the pointer.
                         let s = (p.0 - start.0).abs().max((p.1 - start.1).abs());
                         shape.b = (start.0 + s.copysign(p.0 - start.0), start.1 + s.copysign(p.1 - start.1));
                     }
@@ -1434,6 +1615,8 @@ impl Canvas {
                 render::fit_text(&mut doc.shapes[idx]);
             }
             Drag::Rotate { idx, orig, center, start, .. } => {
+                // The rotation is the change in the pointer's angle as seen
+                // from the mark's centre.
                 let turn = |q: Point| (q.1 - center.1).atan2(q.0 - center.0);
                 let mut delta = turn(p) - turn(*start);
                 if mods.contains(gdk::ModifierType::SHIFT_MASK) {
@@ -1450,7 +1633,10 @@ impl Canvas {
         self.redraw();
     }
 
+    /// The button was released: finish the drag and record its undo step.
     fn drag_end(&self, x: f64, y: f64, mods: gdk::ModifierType) {
+        // Apply the final position first, as a motion event may not have
+        // arrived for it.
         self.drag_update(x, y, mods);
         if matches!(self.0.state.borrow().drag, Drag::Pan { .. }) {
             let space = {
@@ -1469,6 +1655,9 @@ impl Canvas {
             Drag::Create { idx, before, .. } => {
                 let shape = &st.doc.shapes[idx];
                 let r = shape.bounds();
+                // Under 4 screen pixels: a click, not a drag. Throw the mark
+                // away (restoring `before` removes it) rather than leave an
+                // invisible speck. A pen click is a deliberate dot, so it stays.
                 let tiny = !shape.is_freehand() && r.w.max(r.h) * scale < 4.0;
                 if tiny {
                     st.doc = before;
@@ -1542,6 +1731,8 @@ impl Canvas {
             history.record(ed.before, doc);
         }
         ed.popover.popdown();
+        // Unparent later: doing it inside the popover's own signal handlers
+        // (this can run from `closed`) would destroy it mid-emission.
         let pop = ed.popover.clone();
         glib::idle_add_local_once(move || pop.unparent());
         self.emit_selection();
@@ -1575,6 +1766,7 @@ impl Canvas {
             .right_margin(6)
             .build();
         view.buffer().set_text(&text);
+        // Select it all, so typing replaces the text and arrows keep it.
         let (start, end) = view.buffer().bounds();
         view.buffer().select_range(&start, &end);
 
@@ -1616,6 +1808,7 @@ impl Canvas {
         popover.set_parent(&self.0.area);
         popover.set_pointing_to(Some(&rect));
 
+        // Live preview: every keystroke updates the mark and resizes its box.
         let this = self.clone();
         view.buffer().connect_changed(move |b| {
             let text = b.text(&b.start_iter(), &b.end_iter(), false).to_string();
@@ -1655,6 +1848,7 @@ impl Canvas {
         });
         popover.add_controller(keys);
 
+        // However the popover closes (focus loss, the window), keep the text.
         let this = self.clone();
         popover.connect_closed(move |_| {
             glib::g_debug!("pygoscribe", "text editor closed");
@@ -1668,6 +1862,7 @@ impl Canvas {
     }
 }
 
+/// Helpers for the text editor.
 impl Canvas {
     /// The text editor's alignment buttons for a mark described by
     /// (is a Text mark, is a line, halign, valign): left/centre/right, and
@@ -1675,6 +1870,8 @@ impl Canvas {
     /// only lines up its lines left, centre or right.
     fn alignment_buttons(&self, (is_text, is_line, halign, valign): (bool, bool, HAlign, VAlign)) -> gtk::Box {
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        // A linked row of radio-style toggle buttons. Each item is (icon name
+        // or label, tooltip, initially active, alignment to set).
         let group = |items: Vec<(&str, &str, bool, Option<HAlign>, Option<VAlign>)>| {
             let linked = gtk::Box::new(gtk::Orientation::Horizontal, 0);
             linked.add_css_class("linked");
@@ -1687,10 +1884,13 @@ impl Canvas {
                 } else {
                     b.set_label(icon);
                 }
+                // Grouping makes the toggles exclusive, like radio buttons.
                 b.set_group(first.as_ref());
                 first.get_or_insert_with(|| b.clone());
                 let this = self.clone();
                 b.connect_toggled(move |b| {
+                    // Only the newly active button acts (the one turned off
+                    // also gets `toggled`).
                     if b.is_active() {
                         this.align_selected(h, v);
                     }
@@ -1730,6 +1930,7 @@ impl Canvas {
 fn is_double_click(at: Instant, q: Point, now: Instant, p: Point) -> bool {
     let (time, dist) = gtk::Settings::default()
         .map(|s| (s.gtk_double_click_time(), s.gtk_double_click_distance()))
+        // GTK's own defaults, if there are no settings (no display).
         .unwrap_or((400, 5));
     now.duration_since(at) <= Duration::from_millis(time.max(0) as u64)
         && (p.0 - q.0).abs() <= f64::from(dist)
@@ -1743,6 +1944,7 @@ fn keep_shown_size(st: &mut State, width: Option<f64>) {
         && old != new
         && new > 0.0
     {
+        // An image half as wide needs twice the scale to look the same.
         st.scale *= old / new;
         relayout(st);
     }
@@ -1761,6 +1963,7 @@ fn layout(st: &mut State, vis: &Rect) {
     st.offset.1 = view::clamp_offset(vis.y, vis.h, st.scale, h, st.offset.1);
 }
 
+/// [`layout`] for the current visible rectangle, if there is an image.
 fn relayout(st: &mut State) {
     if let Some(vis) = visible_rect(st) {
         layout(st, &vis);
@@ -1787,6 +1990,8 @@ fn view_rect(st: &State) -> Rect {
     }
 }
 
+/// Whether `outer` contains `inner`, give or take half an image pixel (so
+/// rounding at the edge doesn't trigger a needless re-render).
 fn covers(outer: &Rect, inner: &Rect) -> bool {
     const EPS: f64 = 0.5;
     inner.x >= outer.x - EPS
@@ -1801,17 +2006,23 @@ fn current_image(st: &State) -> Option<&ImageSurface> {
     st.doc.image.as_ref().map(|p| &p.0).or(st.image.as_ref())
 }
 
+/// The width of [`current_image`], to detect a change of image size.
 fn image_width(st: &State) -> Option<f64> {
     current_image(st).map(|i| f64::from(i.width()))
 }
 
+/// The part of the image that is the result: the crop, or the whole image.
+/// `None` when there is no image. The view lays out and scrolls this.
 fn visible_rect(st: &State) -> Option<Rect> {
     let img = current_image(st)?;
     Some(st.doc.crop.unwrap_or(Rect { x: 0.0, y: 0.0, w: img.width() as f64, h: img.height() as f64 }))
 }
 
+/// The topmost mark at image point `p` (its body or a line's text), with a
+/// tolerance of [`HIT_TOL`] screen pixels at the current zoom.
 fn shape_at(st: &State, p: Point) -> Option<usize> {
     let tol = HIT_TOL / st.scale;
+    // rposition: search from the top of the stack down.
     st.doc.shapes.iter().rposition(|s| s.hit(p, tol) || render::hits_line_label(s, p, tol))
 }
 
@@ -1834,13 +2045,19 @@ fn outline_bounds(shape: &Shape) -> Rect {
     Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
 }
 
+/// The handle of the selected mark at image point `p`, if any. The grab
+/// area is a little bigger than the drawn handle.
 fn handle_at(st: &State, p: Point) -> Option<usize> {
     let shape = st.doc.shapes.get(st.selected?)?;
     let tol = (HANDLE + 3.0) / st.scale;
     shape.handles().iter().position(|h| (h.0 - p.0).abs() <= tol && (h.1 - p.1).abs() <= tol)
 }
 
+/// Draws the selection: a dashed outline (rotated with the mark) and square
+/// handles. `cr` is in image pixels; sizes are divided by `scale` so they
+/// stay the same on screen at any zoom.
 fn draw_selection(cr: &Context, shape: &Shape, scale: f64) {
+    // One screen pixel, in image pixels.
     let px = 1.0 / scale;
     cr.set_source_rgba(ACCENT.r, ACCENT.g, ACCENT.b, 1.0);
     cr.set_line_width(px);
@@ -1876,8 +2093,11 @@ fn draw_selection(cr: &Context, shape: &Shape, scale: f64) {
     }
 }
 
+/// Darkens everything outside the pending crop and outlines the crop.
 fn draw_crop_overlay(cr: &Context, vis: &Rect, crop: &Rect, scale: f64) {
     let px = 1.0 / scale;
+    // Even-odd fill of the page plus the crop rectangle paints only the
+    // area between them: a frame with a hole.
     cr.set_fill_rule(cairo::FillRule::EvenOdd);
     cr.rectangle(vis.x, vis.y, vis.w, vis.h);
     cr.rectangle(crop.x, crop.y, crop.w, crop.h);
@@ -1897,6 +2117,8 @@ mod tests {
     use super::*;
     use crate::pdf::Pdf;
 
+    /// Runs the GLib main loop for `ms` milliseconds, so idles and timeouts
+    /// (scrollbar sync, sharp PDF rendering) get to run.
     fn pump(ms: u64) {
         let ctx = glib::MainContext::default();
         let end = Instant::now() + Duration::from_millis(ms);

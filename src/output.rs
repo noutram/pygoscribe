@@ -12,6 +12,11 @@
 
 //! Getting the result out of the app: save to a file, hand off to another app,
 //! or attach to a new email. Copying to the clipboard lives in the window.
+//!
+//! Everything here takes the finished, full-resolution result as a
+//! `gdk::Texture` (made by `render::export`), so crops and marks are already
+//! baked in. Multi-page PDF saving is in `pdf::Pdf::save_marked` instead,
+//! because it draws the pages as vectors rather than from a texture.
 
 use gtk::prelude::*;
 use gtk::{gdk, gdk_pixbuf, gio, glib};
@@ -20,6 +25,8 @@ use std::path::{Path, PathBuf};
 
 /// A default file name such as "Markup 2026-11-10 at 21.04.33.png".
 pub fn default_name(ext: &str) -> String {
+    // Dots, not colons, in the time: colons are awkward in file names
+    // (and not allowed on some file systems the file may be copied to).
     let stamp = glib::DateTime::now_local()
         .and_then(|d| d.format("%Y-%m-%d at %H.%M.%S"))
         .map(|s| s.to_string())
@@ -27,6 +34,7 @@ pub fn default_name(ext: &str) -> String {
     format!("Markup {stamp}.{ext}")
 }
 
+/// Wraps an I/O (or any displayable) error as a `glib::Error`.
 fn io_err(e: impl std::fmt::Display) -> glib::Error {
     glib::Error::new(gio::IOErrorEnum::Failed, &e.to_string())
 }
@@ -39,6 +47,9 @@ pub fn save(texture: &gdk::Texture, path: &Path, format: SaveFormat, points_per_
     match format {
         SaveFormat::Pdf => save_pdf(texture, path, points_per_pixel).map_err(io_err),
         SaveFormat::Jpeg => {
+            // JPEG has no alpha: download as packed RGB (transparent areas
+            // come out as their premultiplied colour, usually black) and use
+            // gdk-pixbuf's JPEG saver, since GDK can only write PNG and TIFF.
             let mut dl = gdk::TextureDownloader::new(texture);
             dl.set_format(gdk::MemoryFormat::R8g8b8);
             let (bytes, stride) = dl.download_bytes();
@@ -57,6 +68,9 @@ pub fn save(texture: &gdk::Texture, path: &Path, format: SaveFormat, points_per_
     }
 }
 
+/// A one-page PDF holding the image, the page sized from `points_per_pixel`
+/// (anything non-positive or non-finite counts as 1). The image is embedded
+/// at full resolution and scaled down to the page.
 fn save_pdf(texture: &gdk::Texture, path: &Path, points_per_pixel: f64) -> Result<(), gtk::cairo::Error> {
     use gtk::cairo;
     let scale = if points_per_pixel.is_finite() && points_per_pixel > 0.0 { points_per_pixel } else { 1.0 };
@@ -78,10 +92,13 @@ fn save_pdf(texture: &gdk::Texture, path: &Path, points_per_pixel: f64) -> Resul
 /// back to it.
 #[derive(Clone, Debug)]
 pub struct Original {
+    /// The file to write back to.
     pub file: gio::File,
+    /// Its real format, from its contents rather than its name.
     pub format: OriginalFormat,
 }
 
+/// How Save (Replace Original) writes the file back.
 #[derive(Clone, Debug, PartialEq)]
 pub enum OriginalFormat {
     /// PNG, JPEG or PDF, written as Save As writes them.
@@ -100,6 +117,7 @@ impl Original {
         Some(Self { file: file.clone(), format })
     }
 
+    /// The file's name, for the confirmation dialog.
     pub fn name(&self) -> String {
         self.file.basename().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
     }
@@ -117,6 +135,8 @@ impl Original {
     /// failure leaves the original as it was.
     pub fn replace(&self, write: impl FnOnce(&Path) -> Result<(), glib::Error>) -> Result<(), glib::Error> {
         let tmp = glib::tmp_dir().join(format!("pygoscribe-save-{}.{}", std::process::id(), self.extension()));
+        // replace_contents writes to a temporary file beside the original and
+        // renames it over it, so the swap itself is atomic too.
         let result = write(&tmp).and_then(|()| std::fs::read(&tmp).map_err(io_err)).and_then(|bytes| {
             self.file
                 .replace_contents(&bytes, None, false, gio::FileCreateFlags::NONE, gio::Cancellable::NONE)
@@ -129,6 +149,7 @@ impl Original {
 
 /// The format of the picture at `path`, if gdk-pixbuf can write it.
 fn pixbuf_format(path: &Path) -> Option<OriginalFormat> {
+    // file_info sniffs the contents, so a mislabelled file is still right.
     let (format, _, _) = gdk_pixbuf::Pixbuf::file_info(path)?;
     let name = format.name()?.to_string();
     match name.as_str() {
@@ -141,6 +162,8 @@ fn pixbuf_format(path: &Path) -> Option<OriginalFormat> {
 
 /// Writes the texture with gdk-pixbuf's saver for `format` ("tiff", "bmp"…).
 pub fn save_pixbuf(texture: &gdk::Texture, path: &Path, format: &str) -> Result<(), glib::Error> {
+    // Formats whose gdk-pixbuf saver accepts an alpha channel; the others
+    // fail if given one, so they get RGB.
     let alpha = matches!(format, "png" | "tiff" | "ico" | "webp" | "avif");
     let mut dl = gdk::TextureDownloader::new(texture);
     dl.set_format(if alpha { gdk::MemoryFormat::R8g8b8a8 } else { gdk::MemoryFormat::R8g8b8 });
@@ -203,6 +226,7 @@ pub fn save_temp(texture: &gdk::Texture) -> Result<PathBuf, glib::Error> {
 pub async fn open_with(texture: &gdk::Texture, parent: &impl IsA<gtk::Window>) -> Result<(), glib::Error> {
     let path = save_temp(texture)?;
     let launcher = gtk::FileLauncher::new(Some(&gio::File::for_path(path)));
+    // Show the app chooser even when there is a default image viewer.
     launcher.set_always_ask(true);
     launcher.launch_future(Some(parent)).await
 }
@@ -229,6 +253,8 @@ pub async fn email(texture: &gdk::Texture) -> Result<EmailOutcome, glib::Error> 
         return Ok(EmailOutcome::Attached);
     }
 
+    // Identify the default mail app by its desktop ID and executable, in
+    // lower case, so e.g. "thunderbird_thunderbird.desktop" (snap) matches.
     let handler = gio::AppInfo::default_for_uri_scheme("mailto");
     let id = handler
         .as_ref()
@@ -247,6 +273,8 @@ pub async fn email(texture: &gdk::Texture) -> Result<EmailOutcome, glib::Error> 
         return Ok(EmailOutcome::Attached);
     }
 
+    // xdg-email knows how to pass attachments to these. If it fails, fall
+    // through to the blank-email path rather than report an error.
     if XDG_EMAIL_CLIENTS.iter().any(|c| id.contains(c)) {
         let args = [std::ffi::OsStr::new("xdg-email"), "--attach".as_ref(), path.as_os_str()];
         if let Ok(proc) = gio::Subprocess::newv(&args, gio::SubprocessFlags::STDERR_SILENCE)
@@ -261,8 +289,13 @@ pub async fn email(texture: &gdk::Texture) -> Result<EmailOutcome, glib::Error> 
     Ok(EmailOutcome::PasteNeeded)
 }
 
+/// Asks the Email portal for a compose window with `path` attached. The file
+/// is passed as an open file descriptor (the portal's `attachment_fds`), so
+/// the mail app can read it even though it can't see inside our sandbox.
 async fn email_portal(path: &Path) -> Result<(), glib::Error> {
     let file = std::fs::File::open(path).map_err(io_err)?;
+    // D-Bus sends file descriptors out of band: the message carries an index
+    // (a Handle) into this list.
     let fds = gio::UnixFDList::new();
     let idx = fds.append(&file)?;
 
@@ -291,11 +324,14 @@ async fn email_portal(path: &Path) -> Result<(), glib::Error> {
 mod tests {
     use super::*;
 
+    /// A 20 × 10 solid red texture.
     fn texture() -> gdk::Texture {
         let data: Vec<u8> = (0..20 * 10).flat_map(|_| [255u8, 0, 0, 255]).collect();
         gdk::MemoryTexture::new(20, 10, gdk::MemoryFormat::R8g8b8a8, &glib::Bytes::from_owned(data), 80).upcast()
     }
 
+    /// Each format writes a file with the right magic bytes, whatever the
+    /// name's extension, and PNG/JPEG read back at the right size.
     #[test]
     fn saves_png_jpeg_and_pdf() {
         let dir = std::env::temp_dir().join(format!("pygoscribe-test-{}", std::process::id()));

@@ -12,53 +12,100 @@
 
 //! The markup model: a list of editable shapes over an image, plus an optional
 //! crop. Everything is in image pixel coordinates.
+//!
+//! This module knows nothing about GTK widgets or drawing (see `render` for
+//! that), which keeps the geometry testable.
+//!
+//! # Marks stay editable
+//!
+//! A mark is never baked into the image while the user works. Each one is a
+//! [`Shape`]: its [`Kind`], two defining points (`a` and `b`), a [`Style`], an
+//! optional rotation and optional text. The image itself is never modified;
+//! the result is rendered fresh for every output.
+//!
+//! # The undo model
+//!
+//! Undo works by whole-[`Document`] snapshots ([`History`]). Before an edit,
+//! the canvas clones the document; after it, [`History::record`] compares the
+//! two and pushes the old one only if something changed. Undo and redo swap
+//! the current document with the top of the other stack. Documents are small
+//! (a few dozen shapes), and the one large thing they can hold, a resized
+//! image, is reference-counted ([`Picture`]), so snapshots are cheap and
+//! there is no per-operation undo code to get wrong. Each PDF page has its
+//! own `History` (see `pages`).
 
+/// A point in image pixels, (x, y), y pointing down.
 pub type Point = (f64, f64);
 
+/// A colour with straight (not premultiplied) alpha, each channel 0–1.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rgba {
+    /// Red, 0–1.
     pub r: f64,
+    /// Green, 0–1.
     pub g: f64,
+    /// Blue, 0–1.
     pub b: f64,
+    /// Opacity, 0 (clear) to 1 (opaque).
     pub a: f64,
 }
 
 impl Rgba {
+    /// A colour from its four channels (usable in constants).
     pub const fn new(r: f64, g: f64, b: f64, a: f64) -> Self {
         Self { r, g, b, a }
     }
 }
 
+/// The tool chosen in the tool bar: what a drag on the canvas does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
+    /// Pick, move, resize and rotate marks (V).
     Select,
+    /// Freehand drawing (P).
     Pen,
+    /// A wide, see-through freehand stroke (H).
     Highlighter,
+    /// A straight line (L).
     Line,
+    /// A line with an arrowhead at its end (A).
     Arrow,
+    /// A rectangle (R).
     Rect,
+    /// An ellipse (O).
     Oval,
+    /// A speech bubble (B).
     Bubble,
+    /// A text box (T).
     Text,
+    /// A round magnifier (M).
     Loupe,
+    /// Choose the area to keep (C).
     Crop,
 }
 
+/// The font new text uses before the user picks one.
 pub const DEFAULT_FONT: &str = "Sans";
 
+/// How a mark looks. New marks copy the tool bar's current style.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Style {
+    /// The border, line and text colour.
     pub stroke: Rgba,
     /// Whether rectangles, ovals and bubbles draw their outline. Other marks
     /// always draw with the stroke colour.
     pub border: bool,
+    /// The fill colour of boxed marks, or `None` for no fill.
     pub fill: Option<Rgba>,
+    /// Line width in image pixels.
     pub width: f64,
+    /// Text size in image pixels.
     pub font_size: f64,
     /// Pango font description without a size, e.g. "Sans" or "Serif Bold Italic".
     pub font: String,
 }
 
+/// GNOME red, 4 px lines, 28 px Sans, border on and no fill.
 impl Default for Style {
     fn default() -> Self {
         Self {
@@ -72,16 +119,27 @@ impl Default for Style {
     }
 }
 
+/// What a mark is, with any data only that kind needs.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Kind {
+    /// A freehand stroke through these points.
     Pen(Vec<Point>),
+    /// A highlighter stroke through these points.
     Highlighter(Vec<Point>),
+    /// A straight line from `a` to `b`.
     Line,
+    /// An arrow from `a` to a head at `b`.
     Arrow,
+    /// A rectangle with corners `a` and `b`.
     Rect,
+    /// The ellipse inside the box `a`–`b`.
     Oval,
+    /// A speech bubble in the box `a`–`b`, tail at the bottom.
     Bubble,
+    /// A text box with this text (`\n` separates lines).
     Text(String),
+    /// A circular magnifier over the box `a`–`b` (kept square), enlarging
+    /// the page under it `zoom` times.
     Loupe { zoom: f64 },
 }
 
@@ -103,8 +161,11 @@ impl Tool {
 /// a line or arrow as the text reads (whichever way the line was drawn).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HAlign {
+    /// Left in a box; toward the start of a line as read.
     Left,
+    /// Centred.
     Center,
+    /// Right in a box; toward the end of a line as read.
     Right,
 }
 
@@ -112,12 +173,16 @@ pub enum HAlign {
 /// above the line and `Bottom` below (`Middle` counts as above).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VAlign {
+    /// Top of a box; above a line.
     Top,
+    /// Middle of a box; above a line.
     Middle,
+    /// Bottom of a box; below a line.
     Bottom,
 }
 
 impl HAlign {
+    /// A stable name, used as the target of the text-alignment actions.
     pub fn id(self) -> &'static str {
         match self {
             HAlign::Left => "left",
@@ -126,12 +191,14 @@ impl HAlign {
         }
     }
 
+    /// The inverse of [`Self::id`].
     pub fn from_id(id: &str) -> Option<Self> {
         [HAlign::Left, HAlign::Center, HAlign::Right].into_iter().find(|a| a.id() == id)
     }
 }
 
 impl VAlign {
+    /// A stable name, used as the target of the text-alignment actions.
     pub fn id(self) -> &'static str {
         match self {
             VAlign::Top => "top",
@@ -140,18 +207,22 @@ impl VAlign {
         }
     }
 
+    /// The inverse of [`Self::id`].
     pub fn from_id(id: &str) -> Option<Self> {
         [VAlign::Top, VAlign::Middle, VAlign::Bottom].into_iter().find(|a| a.id() == id)
     }
 }
 
+/// One editable mark.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Shape {
+    /// What it is.
     pub kind: Kind,
     /// Start point / first corner (top-left for text).
     pub a: Point,
     /// End point / opposite corner.
     pub b: Point,
+    /// Colours, width and font.
     pub style: Style,
     /// Clockwise rotation in radians about the centre of `bounds()`. Only
     /// boxed marks (rectangle, oval, bubble, text) use it: lines and freehand
@@ -163,18 +234,25 @@ pub struct Shape {
     /// Where the text sits: `label` for shapes and lines; for a Text mark,
     /// only `halign` counts (how its lines line up).
     pub halign: HAlign,
+    /// See `halign`.
     pub valign: VAlign,
 }
 
+/// An axis-aligned rectangle; `w` and `h` are never negative.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rect {
+    /// Left edge.
     pub x: f64,
+    /// Top edge.
     pub y: f64,
+    /// Width.
     pub w: f64,
+    /// Height.
     pub h: f64,
 }
 
 impl Rect {
+    /// The rectangle with `a` and `b` as opposite corners, in any order.
     pub fn from_points(a: Point, b: Point) -> Self {
         Self {
             x: a.0.min(b.0),
@@ -184,10 +262,12 @@ impl Rect {
         }
     }
 
+    /// Whether `p` is inside, or within `tol` of the edge.
     pub fn contains(&self, p: Point, tol: f64) -> bool {
         p.0 >= self.x - tol && p.0 <= self.x + self.w + tol && p.1 >= self.y - tol && p.1 <= self.y + self.h + tol
     }
 
+    /// The overlap of two rectangles, or `None` if they don't overlap.
     pub fn intersect(&self, o: &Rect) -> Option<Rect> {
         let x0 = self.x.max(o.x);
         let y0 = self.y.max(o.y);
@@ -208,6 +288,7 @@ impl Rect {
 }
 
 /// Rotates `p` by `angle` radians about `c`.
+/// With y pointing down, a positive angle turns clockwise on screen.
 pub fn rotate_point(p: Point, c: Point, angle: f64) -> Point {
     let (sin, cos) = angle.sin_cos();
     let (dx, dy) = (p.0 - c.0, p.1 - c.1);
@@ -221,15 +302,20 @@ pub fn normalize_angle(a: f64) -> f64 {
     if a > PI { a - TAU } else { a }
 }
 
+/// The distance from `p` to the nearest point of the segment `a`–`b`.
 fn dist_to_segment(p: Point, a: Point, b: Point) -> f64 {
     let (dx, dy) = (b.0 - a.0, b.1 - a.1);
     let len2 = dx * dx + dy * dy;
+    // Project p onto the line and clamp to the segment: t = 0 is a, t = 1 is b.
+    // A zero-length segment is just the point a.
     let t = if len2 == 0.0 { 0.0 } else { (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / len2).clamp(0.0, 1.0) };
     let (cx, cy) = (a.0 + t * dx, a.1 + t * dy);
     ((p.0 - cx).powi(2) + (p.1 - cy).powi(2)).sqrt()
 }
 
 impl Shape {
+    /// A new mark of `kind` starting at `p` (both points at `p` until the
+    /// drag moves `b`).
     pub fn new(kind: Kind, p: Point, style: Style) -> Self {
         // Text goes in the middle of a box, above the middle of a line, and
         // a Text mark's lines start at the left.
@@ -255,6 +341,7 @@ impl Shape {
         }
     }
 
+    /// Replaces the mark's text (see [`Self::text`]).
     pub fn set_text(&mut self, text: String) {
         match &mut self.kind {
             Kind::Text(t) => *t = text,
@@ -272,6 +359,7 @@ impl Shape {
         matches!(self.kind, Kind::Rect | Kind::Oval | Kind::Bubble | Kind::Text(_))
     }
 
+    /// The centre of [`Self::bounds`], the pivot for rotation.
     pub fn center(&self) -> Point {
         let r = self.bounds();
         (r.x + r.w / 2.0, r.y + r.h / 2.0)
@@ -284,6 +372,10 @@ impl Shape {
     }
 
     /// Writes `orig` turned by `delta` radians about its centre into `self`.
+    ///
+    /// Working from the shape as it was when the drag began (`orig`), rather
+    /// than adding small steps to `self`, keeps rounding errors from building
+    /// up during a long drag and makes snapping to 15° exact.
     pub fn rotate_from(&mut self, orig: &Shape, delta: f64) {
         *self = orig.clone();
         if !orig.can_rotate() {
@@ -303,6 +395,7 @@ impl Shape {
         }
     }
 
+    /// Whether the mark is a pen or highlighter stroke.
     pub fn is_freehand(&self) -> bool {
         matches!(self.kind, Kind::Pen(_) | Kind::Highlighter(_))
     }
@@ -312,14 +405,19 @@ impl Shape {
         self.style.border || !self.kind.has_optional_border()
     }
 
+    /// Whether the mark is a line or arrow (two end handles, not four corners).
     pub fn is_segment(&self) -> bool {
         matches!(self.kind, Kind::Line | Kind::Arrow)
     }
 
+    /// The highlighter's stroke is much wider than the chosen line width, so
+    /// it covers a line of text.
     pub fn highlighter_width(&self) -> f64 {
         (self.style.width * 5.0).max(14.0)
     }
 
+    /// The mark's box in its own (unrotated) frame: the extent of a stroke's
+    /// points, a loupe's square, or the box `a`–`b` for everything else.
     pub fn bounds(&self) -> Rect {
         match &self.kind {
             Kind::Pen(pts) | Kind::Highlighter(pts) if !pts.is_empty() => {
@@ -346,12 +444,16 @@ impl Shape {
         if self.is_segment() { vec![self.a, self.b] } else { self.outline().to_vec() }
     }
 
+    /// Whether image point `p` is on the mark, allowing `tol` image pixels of
+    /// slack (the canvas passes a few screen pixels' worth). Lines and strokes
+    /// count only near the stroke; boxed marks count anywhere inside.
     pub fn hit(&self, p: Point, tol: f64) -> bool {
         // Test boxed marks in their own, unrotated frame.
         let p = if self.angle != 0.0 { rotate_point(p, self.center(), -self.angle) } else { p };
         let reach = tol + self.style.width / 2.0;
         match &self.kind {
             Kind::Line | Kind::Arrow => dist_to_segment(p, self.a, self.b) <= reach,
+            // A single-point stroke (a dot) has no windows; test the point.
             Kind::Pen(pts) => pts.windows(2).any(|w| dist_to_segment(p, w[0], w[1]) <= reach)
                 || pts.first().is_some_and(|q| dist_to_segment(p, *q, *q) <= reach),
             Kind::Highlighter(pts) => {
@@ -362,6 +464,7 @@ impl Shape {
         }
     }
 
+    /// Moves the mark by (`dx`, `dy`).
     pub fn translate(&mut self, dx: f64, dy: f64) {
         self.a = (self.a.0 + dx, self.a.1 + dy);
         self.b = (self.b.0 + dx, self.b.1 + dy);
@@ -388,6 +491,10 @@ impl Shape {
     }
 
     /// Moves handle `idx` of `orig` to `p`, writing the result into `self`.
+    ///
+    /// Handles are numbered as [`Self::handles`] returns them: 0 and 1 are a
+    /// line's ends; 0–3 are a box's corners clockwise from top-left. The
+    /// corner opposite the dragged one (`idx + 2`) stays fixed.
     pub fn resize_from(&mut self, orig: &Shape, idx: usize, p: Point) {
         *self = orig.clone();
         if orig.is_segment() {
@@ -400,6 +507,10 @@ impl Shape {
         // A rotated box is resized in its own frame, keeping the opposite
         // corner where it is on screen.
         let (fixed, p) = if orig.angle != 0.0 {
+            // 1. Where the fixed corner is on screen.
+            // 2. The pointer, turned into the box's frame about that corner.
+            // 3. Half the new diagonal in that frame, and the new centre on
+            //    screen (half way along the diagonal, turned back).
             let c = orig.center();
             let fixed_world = rotate_point(fixed, c, orig.angle);
             let v = rotate_point(p, fixed_world, -orig.angle);
@@ -411,6 +522,8 @@ impl Shape {
             (fixed, p)
         };
         let mut nr = Rect::from_points(fixed, p);
+        // A loupe stays a circle: use the larger side for both, growing
+        // away from the fixed corner in the direction of the drag.
         if matches!(orig.kind, Kind::Loupe { .. }) {
             let s = nr.w.max(nr.h);
             let sx = if p.0 < fixed.0 { -s } else { s };
@@ -419,6 +532,7 @@ impl Shape {
         }
         match &mut self.kind {
             Kind::Pen(pts) | Kind::Highlighter(pts) => {
+                // Stretch every point from the old box into the new one.
                 let sx = if r.w > 0.0 { nr.w / r.w } else { 1.0 };
                 let sy = if r.h > 0.0 { nr.h / r.h } else { 1.0 };
                 for q in pts.iter_mut() {
@@ -445,9 +559,13 @@ impl Shape {
     }
 }
 
+/// Everything the user has done to one page: the unit of undo.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Document {
+    /// The marks, bottom to top (later marks draw over earlier ones).
     pub shapes: Vec<Shape>,
+    /// The area to keep, in image pixels, or `None` for the whole image.
+    /// Cropping is non-destructive: marks outside it are kept.
     pub crop: Option<Rect>,
     /// A resampled image that replaces the page's own (Scale Image to Visible
     /// Size). Kept here so undo puts the old image back with the old marks.
@@ -459,12 +577,15 @@ pub struct Document {
 #[derive(Clone)]
 pub struct Picture(pub gtk::cairo::ImageSurface);
 
+/// Identity, not pixel, comparison: cloning an `ImageSurface` only adds a
+/// reference, so two snapshots of the same document hold the same pointer.
 impl PartialEq for Picture {
     fn eq(&self, other: &Self) -> bool {
         self.0.to_raw_none() == other.0.to_raw_none()
     }
 }
 
+/// Prints the size rather than the pixels.
 impl std::fmt::Debug for Picture {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Picture({}x{})", self.0.width(), self.0.height())
@@ -478,6 +599,8 @@ impl Document {
         for s in &mut self.shapes {
             s.scale(k);
         }
+        // Round the crop to whole pixels, at least 1 × 1, so the exported image
+        // has an exact size.
         self.crop = self.crop.map(|r| Rect { x: (r.x * k).round(), y: (r.y * k).round(), w: (r.w * k).round().max(1.0), h: (r.h * k).round().max(1.0) });
     }
 
@@ -522,20 +645,26 @@ impl Document {
     }
 }
 
-/// Undo/redo by whole-document snapshots; documents are small.
+/// Undo/redo by whole-document snapshots; documents are small (see the
+/// module docs).
 #[derive(Default)]
 pub struct History {
+    /// Earlier states, oldest first; the last is what Undo restores.
     undo: Vec<Document>,
+    /// States undone, most recently undone last; cleared by any new edit.
     redo: Vec<Document>,
 }
 
 impl History {
-    /// Records `before` as an undo step if the document changed.
-    /// How many steps can be undone.
+    /// How many steps can be undone. The canvas compares this before and
+    /// after an operation to tell whether it recorded a step.
     pub fn depth(&self) -> usize {
         self.undo.len()
     }
 
+    /// Records `before` as an undo step if the document changed (`now`
+    /// differs). A new step makes the redo stack meaningless, so it is
+    /// cleared.
     pub fn record(&mut self, before: Document, now: &Document) {
         if &before != now {
             self.undo.push(before);
@@ -543,6 +672,8 @@ impl History {
         }
     }
 
+    /// Puts back the previous state, moving the current one onto the redo
+    /// stack. Returns false if there was nothing to undo.
     pub fn undo(&mut self, doc: &mut Document) -> bool {
         match self.undo.pop() {
             Some(prev) => {
@@ -553,6 +684,7 @@ impl History {
         }
     }
 
+    /// Re-applies the last undone state. Returns false if there is none.
     pub fn redo(&mut self, doc: &mut Document) -> bool {
         match self.redo.pop() {
             Some(next) => {
@@ -563,10 +695,12 @@ impl History {
         }
     }
 
+    /// Whether Undo would do anything (for the Undo button's sensitivity).
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
     }
 
+    /// Whether Redo would do anything.
     pub fn can_redo(&self) -> bool {
         !self.redo.is_empty()
     }
@@ -576,6 +710,7 @@ impl History {
 mod tests {
     use super::*;
 
+    /// Dragging the bottom-right corner grows the box from the top-left.
     #[test]
     fn resize_rect_from_corner() {
         let mut s = Shape::new(Kind::Rect, (10.0, 10.0), Style::default());
@@ -585,10 +720,13 @@ mod tests {
         assert_eq!(s.bounds(), Rect { x: 10.0, y: 10.0, w: 60.0, h: 50.0 });
     }
 
+    /// Whether two points are equal up to rounding.
     fn close(a: Point, b: Point) -> bool {
         (a.0 - b.0).abs() < 1e-9 && (a.1 - b.1).abs() < 1e-9
     }
 
+    /// A boxed mark rotates by its angle: its box is unchanged but the hit
+    /// area and handles turn.
     #[test]
     fn rotate_rect_keeps_box_and_turns_hit_area() {
         use std::f64::consts::FRAC_PI_2;
@@ -604,6 +742,7 @@ mod tests {
         assert!(close(s.handles()[0], (60.0, 0.0)));
     }
 
+    /// A line rotates by moving its points, not by an angle.
     #[test]
     fn rotate_line_moves_points() {
         use std::f64::consts::FRAC_PI_2;
@@ -616,6 +755,7 @@ mod tests {
         assert!(close(s.b, (50.0, 100.0)));
     }
 
+    /// Resizing a rotated box keeps the opposite corner still on screen.
     #[test]
     fn resize_rotated_rect_keeps_opposite_corner() {
         let mut s = Shape::new(Kind::Rect, (0.0, 0.0), Style::default());
@@ -630,6 +770,7 @@ mod tests {
         assert!((s.angle - 0.7).abs() < 1e-9);
     }
 
+    /// Only rectangles, ovals and bubbles can hide their border.
     #[test]
     fn border_only_optional_for_boxes() {
         let style = Style { border: false, fill: Some(Rgba::new(1.0, 1.0, 0.0, 0.3)), ..Style::default() };
@@ -642,6 +783,7 @@ mod tests {
         assert!(Style::default().border);
     }
 
+    /// A loupe ignores rotation.
     #[test]
     fn loupe_does_not_rotate() {
         let mut s = Shape::new(Kind::Loupe { zoom: 2.0 }, (0.0, 0.0), Style::default());
@@ -651,6 +793,7 @@ mod tests {
         assert_eq!(s, orig);
     }
 
+    /// A line is hit near the stroke only.
     #[test]
     fn hit_line() {
         let mut s = Shape::new(Kind::Line, (0.0, 0.0), Style::default());
@@ -659,12 +802,14 @@ mod tests {
         assert!(!s.hit((50.0, 20.0), 2.0));
     }
 
+    /// A 100 × 40 text mark at `at`.
     fn text(s: &str, at: Point) -> Shape {
         let mut t = Shape::new(Kind::Text(s.into()), at, Style::default());
         t.b = (at.0 + 100.0, at.1 + 40.0);
         t
     }
 
+    /// `text_at` picks the topmost text mark and ignores other marks.
     #[test]
     fn text_at_finds_topmost_text_only() {
         let mut doc = Document::default();
@@ -678,6 +823,7 @@ mod tests {
         assert_eq!(doc.text_at((10.0, 150.0), 1.0), None);
     }
 
+    /// Finishing an edit keeps, reverts or removes a text mark.
     #[test]
     fn finish_text_edit_keeps_cancels_and_removes() {
         let mut doc = Document::default();
@@ -698,6 +844,7 @@ mod tests {
         assert!(doc.shapes.is_empty());
     }
 
+    /// Shapes and lines keep their text in `label` and survive being emptied.
     #[test]
     fn shapes_keep_text_in_a_label() {
         let mut doc = Document::default();
@@ -727,6 +874,7 @@ mod tests {
         assert_eq!(VAlign::from_id(VAlign::Bottom.id()), Some(VAlign::Bottom));
     }
 
+    /// Scaling a document scales points, widths, fonts and the crop.
     #[test]
     fn scale_document_scales_marks_and_crop() {
         let mut doc = Document::default();
@@ -747,6 +895,7 @@ mod tests {
         assert_eq!(doc.crop, Some(Rect { x: 5.0, y: 5.0, w: 51.0, h: 26.0 }));
     }
 
+    /// Bring to Front / Send to Back reorder the marks.
     #[test]
     fn restack_moves_mark_to_front_or_back() {
         let mut doc = Document::default();
@@ -760,6 +909,7 @@ mod tests {
         assert_eq!(doc.restack(9, true), 9, "out of range does nothing");
     }
 
+    /// Undo then Redo returns to the same document.
     #[test]
     fn undo_redo_roundtrip() {
         let mut doc = Document::default();

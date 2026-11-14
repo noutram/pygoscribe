@@ -408,8 +408,13 @@ poppler-rs 0.26, cairo-rs 0.22 (feature `pdf`), edition 2024. Flatpak uses GNOME
 
 ## Build and install
 
+README.md, "Building from a clean Ubuntu install", has the full steps
+(apt packages, rustup, cargo-deb, Flatpak SDK), checked in clean `ubuntu:26.04`
+and `ubuntu:24.04` containers in Nov 2026. In short:
+
 ```sh
-sudo apt install build-essential libgtk-4-dev libadwaita-1-dev libpoppler-glib-dev flatpak-builder
+sudo apt install build-essential pkg-config curl git libgtk-4-dev libadwaita-1-dev libpoppler-glib-dev flatpak flatpak-builder
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   # Rust 1.88+ (let chains)
 cargo run --release                  # run from source
 
 ./install.sh                         # tests + dist/*.deb + dist/pygoscribe.flatpak
@@ -447,6 +452,15 @@ Push `master` and the tag to both remotes first (`origin` = GitHub `main`,
 `pi5` = Gitea `master`).
 `--no-upload` only builds. Smoke-test the Flatpak with
 `flatpak install --user --reinstall dist/release/pygoscribe-<ver>.flatpak`.
+
+## Code comments
+
+Since 0.1.18 every source file has a `//!` module comment, every item a `///`
+doc comment, and the non-obvious logic inline comments (the borrow pattern
+in `canvas.rs`, the undo model in `document.rs`, Wayland activation tokens
+in `window.rs` and `launch.rs`, raster vs vector PDF rendering in `pdf.rs`).
+`cargo doc --document-private-items` builds without warnings; keep it that
+way, and comment new code to the same standard.
 
 ## Testing tips
 

@@ -11,7 +11,23 @@
 // details.
 
 //! Cairo drawing of the image and its markup, in image coordinates. Shared by
-//! the on-screen canvas and (in step 3) export.
+//! the on-screen canvas, export (Copy, Save, Send To), page thumbnails and
+//! Save as PDF, so every output looks exactly like the screen.
+//!
+//! # Conventions
+//!
+//! - Every function draws in *image pixels*. Callers set up the transform
+//!   (zoom, scroll, crop offset, PDF points) on the cairo context first.
+//! - A mark with an angle is drawn by rotating the context about the mark's
+//!   centre ([`draw_shape_on`]); the geometry itself is always unrotated.
+//! - Text is laid out with Pango with hinting turned off, so a text mark has
+//!   the same proportions at every zoom and in the full-resolution export.
+//! - Surfaces are cairo `ARgb32`, which is premultiplied BGRA in memory on
+//!   little-endian machines; that matches GDK's `B8g8r8a8Premultiplied`, so
+//!   textures and surfaces convert without touching the pixels.
+//! - The highlighter blends with `Operator::Multiply`, so callers that want
+//!   it to blend only with the page (not with what is under the output) draw
+//!   the page into a group first (`push_group` / `pop_group_to_source`).
 
 use crate::document::{rotate_point, Document, HAlign, Kind, Point, Rect, Rgba, Shape, VAlign};
 use gtk::cairo::{self, Context, ImageSurface};
@@ -20,10 +36,12 @@ use gtk::pango;
 use gtk::prelude::*;
 use std::f64::consts::PI;
 
+/// Distance between text baselines, as a multiple of the font size.
 const LINE_SPACING: f64 = 1.25;
 
 /// Converts a GDK texture into a cairo surface we can paint and sample.
 pub fn surface_from_texture(texture: &gdk::Texture) -> Result<ImageSurface, cairo::Error> {
+    // Download straight into cairo's own pixel layout (see module docs).
     let mut dl = gdk::TextureDownloader::new(texture);
     dl.set_format(gdk::MemoryFormat::B8g8r8a8Premultiplied);
     let (bytes, stride) = dl.download_bytes();
@@ -36,13 +54,15 @@ pub fn surface_from_texture(texture: &gdk::Texture) -> Result<ImageSurface, cair
     )
 }
 
+/// Makes `c` the source colour.
 fn set_color(cr: &Context, c: Rgba) {
     cr.set_source_rgba(c.r, c.g, c.b, c.a);
 }
 
 /// A Pango layout for one line of text in a mark's font, drawing on `cr`.
 /// Hinting is off so text has the same proportions at every zoom and in the
-/// full-resolution export.
+/// full-resolution export. Also returns the font's ascent in image pixels,
+/// used to line up baselines.
 fn text_layout(cr: &Context, font: &str, font_size: f64) -> (pango::Layout, f64) {
     let layout = pangocairo::functions::create_layout(cr);
     if let Ok(mut opts) = cairo::FontOptions::new() {
@@ -61,6 +81,7 @@ fn text_layout(cr: &Context, font: &str, font_size: f64) -> (pango::Layout, f64)
 
 /// Size of a text block in a font at a font size.
 pub fn text_size(text: &str, font: &str, font_size: f64) -> (f64, f64) {
+    // Pango needs a context to measure with; a 1×1 surface is enough.
     let surf = ImageSurface::create(cairo::Format::ARgb32, 1, 1).expect("scratch surface");
     let cr = Context::new(&surf).expect("scratch context");
     let (layout, _) = text_layout(&cr, font, font_size);
@@ -71,6 +92,7 @@ pub fn text_size(text: &str, font: &str, font_size: f64) -> (f64, f64) {
             layout.set_text(l);
             f64::from(layout.extents().1.width()) / f64::from(pango::SCALE)
         })
+        // Never narrower than half an em, so an empty mark can still be hit.
         .fold(font_size * 0.5, f64::max);
     (w, lines.len() as f64 * font_size * LINE_SPACING)
 }
@@ -109,10 +131,13 @@ fn label_area(shape: &Shape) -> Rect {
     let border = if shape.draws_border() { shape.style.width / 2.0 } else { 0.0 };
     let (r, inset) = match shape.kind {
         Kind::Oval => {
+            // The largest axis-aligned box inside an ellipse spans 1/√2 of
+            // each axis, so inset each side by (1 − 1/√2)/2 of the width/height.
             let k = (1.0 - std::f64::consts::FRAC_1_SQRT_2) / 2.0;
             let inner = Rect { x: r.x + r.w * k, y: r.y + r.h * k, w: r.w * (1.0 - 2.0 * k), h: r.h * (1.0 - 2.0 * k) };
             (inner, pad)
         }
+        // The top 78 % is the body; the rest is the tail (see bubble_path).
         Kind::Bubble => (Rect { h: r.h * 0.78, ..r }, border + pad),
         _ => (r, border + pad),
     };
@@ -124,12 +149,18 @@ fn label_area(shape: &Shape) -> Rect {
 /// top-left corner and size in that frame. The frame is turned so the text
 /// never reads upside down.
 struct LineLabel {
+    /// The end of the line the text frame starts from, in image coordinates.
     origin: Point,
+    /// The frame's rotation, in radians, already flipped to read upright.
     angle: f64,
+    /// The text block's top-left corner in the frame.
     pos: Point,
+    /// The text block's width and height.
     size: (f64, f64),
 }
 
+/// Lays out a line's or arrow's text. None for other marks, for no text, or
+/// for a line too short to have a direction.
 fn line_label(shape: &Shape) -> Option<LineLabel> {
     if !shape.is_segment() || shape.label.is_empty() {
         return None;
@@ -143,6 +174,8 @@ fn line_label(shape: &Shape) -> Option<LineLabel> {
     let mut angle = (b.1 - a.1).atan2(b.0 - a.0);
     // Read left to right: start from whichever end is on the left (an
     // upright line reads bottom to top, like a chart's axis label).
+    // `flipped` means the line was drawn right to left (or top to bottom),
+    // so the frame turns 180° and starts from `b`.
     let flipped = angle.cos() < -1e-9 || (angle.cos().abs() <= 1e-9 && angle.sin() > 0.0);
     let origin = if flipped {
         angle += PI;
@@ -160,7 +193,8 @@ fn line_label(shape: &Shape) -> Option<LineLabel> {
         HAlign::Center => (len - tw) / 2.0,
         HAlign::Right => len - head_end - pad - tw,
     };
-    // Clear the line and, near the tip, the head's spread.
+    // Clear the line and, near the tip, the head's spread. y is negative
+    // (above the line) unless Bottom was chosen.
     let gap = st.width / 2.0 + pad;
     let y = match shape.valign {
         VAlign::Bottom => gap,
@@ -183,6 +217,7 @@ pub fn line_label_outline(shape: &Shape) -> Option<[Point; 4]> {
 /// Whether `p` is on a line's or arrow's text.
 pub fn hits_line_label(shape: &Shape, p: Point, tol: f64) -> bool {
     let Some(l) = line_label(shape) else { return false };
+    // Turn the point into the text's frame, where the block is axis-aligned.
     let q = rotate_point((p.0 - l.origin.0, p.1 - l.origin.1), (0.0, 0.0), -l.angle);
     Rect { x: l.pos.0, y: l.pos.1, w: l.size.0, h: l.size.1 }.contains(q, tol)
 }
@@ -223,6 +258,7 @@ fn draw_label(cr: &Context, shape: &Shape) {
 pub fn fit_text(shape: &mut Shape) {
     if let Kind::Text(t) = &shape.kind {
         let (w, h) = text_size(t, &shape.style.font, shape.style.font_size);
+        // The same padding draw_shape_on leaves around the text.
         let pad = shape.style.font_size * 0.2;
         let (w, h) = (w + 2.0 * pad, h + 2.0 * pad);
         if shape.angle == 0.0 {
@@ -239,6 +275,7 @@ pub fn fit_text(shape: &mut Shape) {
     }
 }
 
+/// Draws a picture and its marks: [`draw_page`] with the image as background.
 pub fn draw_document(cr: &Context, image: &ImageSurface, doc: &Document) {
     draw_page(cr, &|cr: &Context| paint_image(cr, image), doc);
 }
@@ -258,12 +295,16 @@ pub fn draw_page(cr: &Context, background: Background, doc: &Document) {
     }
 }
 
+/// Paints `image` at the origin, with good (bilinear-or-better) filtering
+/// so it looks smooth when scaled.
 pub fn paint_image(cr: &Context, image: &ImageSurface) {
     let _ = cr.set_source_surface(image, 0.0, 0.0);
     cr.source().set_filter(cairo::Filter::Good);
     let _ = cr.paint();
 }
 
+/// Adds a path through `pts`. A single point gets a tiny segment so a round
+/// cap draws it as a dot (a click with the pen).
 fn polyline(cr: &Context, pts: &[Point]) {
     if let Some(first) = pts.first() {
         cr.move_to(first.0, first.1);
@@ -276,6 +317,8 @@ fn polyline(cr: &Context, pts: &[Point]) {
     }
 }
 
+/// Adds a rectangle with corners rounded by `radius` (limited to half the
+/// shorter side), as a closed sub-path, clockwise from the top right.
 fn rounded_rect(cr: &Context, r: &Rect, radius: f64) {
     let rad = radius.min(r.w / 2.0).min(r.h / 2.0);
     cr.new_sub_path();
@@ -299,6 +342,8 @@ fn bubble_path(cr: &Context, r: &Rect) {
     cr.arc(right - rad, top + rad, rad, -PI / 2.0, 0.0);
     cr.arc(right - rad, base - rad, rad, 0.0, PI / 2.0);
     if tw > 0.0 {
+        // Going right to left along the bottom: the tail's right foot, its
+        // tip (down at the bottom of the bounds, leaning left), its left foot.
         cr.line_to(tx + tw, base);
         cr.line_to(tx - tw * 0.6, r.y + r.h);
         cr.line_to(tx, base);
@@ -319,6 +364,8 @@ fn fill_and_stroke(cr: &Context, shape: &Shape) {
         cr.set_line_width(shape.style.width);
         let _ = cr.stroke();
     } else {
+        // fill_preserve kept the path; clear it so it can't leak into the
+        // next thing drawn.
         cr.new_path();
     }
 }
@@ -337,6 +384,7 @@ fn with_alpha(cr: &Context, alpha: f64, draw: impl FnOnce()) {
     let _ = cr.paint_with_alpha(alpha);
 }
 
+/// Draws one mark over `image` (tests only).
 #[cfg(test)]
 pub fn draw_shape(cr: &Context, image: &ImageSurface, shape: &Shape) {
     draw_shape_on(cr, &|cr: &Context| paint_image(cr, image), shape);
@@ -347,6 +395,8 @@ pub fn draw_shape_on(cr: &Context, background: Background, shape: &Shape) {
     let _ = cr.save();
     cr.set_line_cap(cairo::LineCap::Round);
     cr.set_line_join(cairo::LineJoin::Round);
+    // Rotate about the mark's centre: move the centre to the origin, turn,
+    // and move back.
     if shape.angle != 0.0 {
         let (cx, cy) = shape.center();
         cr.translate(cx, cy);
@@ -363,6 +413,8 @@ pub fn draw_shape_on(cr: &Context, background: Background, shape: &Shape) {
         }
         Kind::Highlighter(pts) => {
             polyline(cr, pts);
+            // A see-through, multiplied stroke: like a marker pen, it
+            // darkens what is under it without hiding text.
             set_color(cr, Rgba { a: 0.4 * st.stroke.a, ..st.stroke });
             cr.set_line_width(shape.highlighter_width());
             cr.set_line_cap(cairo::LineCap::Square);
@@ -390,6 +442,8 @@ pub fn draw_shape_on(cr: &Context, background: Background, shape: &Shape) {
         Kind::Oval => {
             let r = shape.bounds();
             if r.w > 0.0 && r.h > 0.0 {
+                // An ellipse is a unit circle scaled. Restore before stroking
+                // so the line width isn't scaled too.
                 let _ = cr.save();
                 cr.translate(r.x + r.w / 2.0, r.y + r.h / 2.0);
                 cr.scale(r.w / 2.0, r.h / 2.0);
@@ -415,6 +469,9 @@ pub fn draw_shape_on(cr: &Context, background: Background, shape: &Shape) {
             draw_text_block(cr, shape, text, (r.x + pad, r.y + pad), r.w - 2.0 * pad);
         }
         Kind::Loupe { zoom } => {
+            // A magnifying glass: clip to a circle, zoom about its centre and
+            // paint the page again (white first, for transparent pictures),
+            // then draw the rim. Only the page is magnified, not other marks.
             let r = shape.bounds();
             if r.w > 1.0 {
                 let (cx, cy, rad) = (r.x + r.w / 2.0, r.y + r.h / 2.0, r.w / 2.0);
@@ -438,6 +495,8 @@ pub fn draw_shape_on(cr: &Context, background: Background, shape: &Shape) {
     let _ = cr.restore();
 }
 
+/// Draws an arrow from `a` to a filled triangular head at `b`. The head
+/// grows with the line width but never takes more than 60 % of the length.
 fn draw_arrow(cr: &Context, shape: &Shape) {
     let st = &shape.style;
     let (ax, ay) = shape.a;
@@ -448,6 +507,7 @@ fn draw_arrow(cr: &Context, shape: &Shape) {
     }
     let head = (st.width * 3.0 + 8.0).min(len * 0.6);
     let angle = (by - ay).atan2(bx - ax);
+    // Half the head's opening angle, in radians (about 26°).
     let spread = 0.45;
     let (ux, uy) = (angle.cos(), angle.sin());
     with_alpha(cr, st.stroke.a, || {
@@ -472,6 +532,9 @@ pub fn export(image: &ImageSurface, doc: &Document) -> Result<gdk::Texture, cair
     let out = ImageSurface::create(cairo::Format::ARgb32, w, h)?;
     {
         let cr = Context::new(&out)?;
+        // Shift so the crop's corner lands at (0, 0); anything outside the
+        // crop falls off the surface. The group keeps the highlighter's
+        // multiply blending with the image only.
         cr.translate(-r.x, -r.y);
         cr.push_group();
         draw_document(&cr, image, doc);
@@ -509,10 +572,12 @@ pub fn render_thumbnail(
 
 /// Turns a finished ARGB32 surface into a texture.
 pub fn texture_from_surface(out: ImageSurface) -> Result<gdk::Texture, cairo::Error> {
+    // Make sure cairo has finished writing before reading the pixels.
     out.flush();
     let (w, h) = (out.width(), out.height());
     let stride = out.stride() as usize;
     let mut bytes = None;
+    // Copies the pixels into GLib bytes the texture can own.
     out.with_data(|d| bytes = Some(gtk::glib::Bytes::from(d)))
         .map_err(|_| cairo::Error::SurfaceFinished)?;
     let bytes = bytes.ok_or(cairo::Error::SurfaceFinished)?;
@@ -542,6 +607,7 @@ mod tests {
         }
     }
 
+    /// A half-transparent arrow is evenly grey, even where shaft and head meet.
     #[test]
     fn translucent_arrow_has_no_dark_overlap() {
         let style = Style { stroke: Rgba::new(0.0, 0.0, 0.0, 0.5), width: 4.0, ..Style::default() };
@@ -555,6 +621,7 @@ mod tests {
         assert_eq!(shaft, overlap);
     }
 
+    /// Border off: only the fill is painted.
     #[test]
     fn borderless_rect_draws_only_its_fill() {
         let style = Style {
@@ -573,6 +640,7 @@ mod tests {
         assert!((inside.1 as i32 - 128).abs() <= 2, "inside {inside:?}");
     }
 
+    /// Fill off: the bubble's inside shows what's underneath.
     #[test]
     fn bubble_without_fill_is_see_through() {
         let style = Style { fill: None, width: 2.0, ..Style::default() };
@@ -582,6 +650,7 @@ mod tests {
         assert_eq!(px(100, 40), (255, 255, 255));
     }
 
+    /// The font is honoured, and text scales linearly with its size.
     #[test]
     fn text_uses_its_font() {
         let sans = text_size("iiii", "Sans", 20.0).0;
@@ -592,6 +661,7 @@ mod tests {
         assert!((big - 2.0 * mono).abs() < 0.5, "mono {mono}, big {big}");
     }
 
+    /// A fitted text mark's ink lies inside its box.
     #[test]
     fn text_draws_ink_inside_its_box() {
         let style = Style { stroke: Rgba::new(0.0, 0.0, 0.0, 1.0), font: "Serif Bold".into(), ..Style::default() };
@@ -625,10 +695,12 @@ mod tests {
         (x0 <= x1).then(|| Rect { x: x0.into(), y: y0.into(), w: (x1 - x0).into(), h: (y1 - y0).into() })
     }
 
+    /// Black text on a transparent fill with no border, so only text is ink.
     fn black() -> Style {
         Style { stroke: Rgba::new(0.0, 0.0, 0.0, 1.0), border: false, fill: Some(Rgba::new(1.0, 1.0, 1.0, 0.0)), font_size: 16.0, ..Style::default() }
     }
 
+    /// Shape text moves with its horizontal and vertical alignment.
     #[test]
     fn rect_text_follows_its_alignment() {
         let mut rect = Shape::new(Kind::Rect, (10.0, 10.0), black());
@@ -648,6 +720,7 @@ mod tests {
         assert!(br.x + br.w > 175.0 && br.y + br.h > 75.0, "bottom right: {br:?}");
     }
 
+    /// Line text sits above or below, and reads upright either way round.
     #[test]
     fn line_text_goes_above_or_below_and_reads_upright() {
         let mut line = Shape::new(Kind::Line, (20.0, 50.0), black());

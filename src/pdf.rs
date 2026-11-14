@@ -12,6 +12,23 @@
 
 //! Opening PDFs: a page is rendered with poppler into an image, which is then
 //! marked up like any other picture.
+//!
+//! # Coordinates
+//!
+//! PDF pages are measured in points (1/72 inch). The canvas and the marks
+//! work in *image pixels* of the rendered page, at [`PIXELS_PER_POINT`]
+//! (capped by [`MAX_SIDE`] for huge pages). [`PageSize::scale`] converts
+//! points to pixels; [`PageSize::points_per_pixel`] goes back, which is how
+//! Save as PDF gives each page its original printed size.
+//!
+//! # Raster for editing, vector for output
+//!
+//! Poppler draws a page onto any cairo context. For editing, [`Pdf::render`]
+//! draws it once onto an image surface, which the canvas treats like a
+//! picture. Everywhere sharpness or file size matters (zoomed-in redraws,
+//! thumbnails, the loupe and [`Pdf::save_marked`]), [`Pdf::painter`] draws
+//! the page again as vectors at whatever scale the target needs, so text in
+//! a saved PDF stays selectable.
 
 use gtk::prelude::*;
 use gtk::{cairo, gdk, gio, glib};
@@ -33,11 +50,13 @@ pub fn is_pdf(file: &gio::File) -> bool {
     if named_pdf {
         return true;
     }
+    // Every PDF starts with the "%PDF-" magic bytes.
     file.read(gio::Cancellable::NONE)
         .and_then(|s| s.read_bytes(5, gio::Cancellable::NONE))
         .is_ok_and(|b| b.as_ref() == b"%PDF-")
 }
 
+/// An open PDF document. Cloning is cheap: it shares the Poppler document.
 #[derive(Clone)]
 pub struct Pdf(poppler::Document);
 
@@ -48,24 +67,31 @@ pub struct PageSize {
     pub scale: f64,
     /// The page's image size in pixels.
     pub width: i32,
+    /// See `width`.
     pub height: i32,
 }
 
 impl PageSize {
+    /// PDF points per image pixel, the inverse of `scale`.
     pub fn points_per_pixel(&self) -> f64 {
         1.0 / self.scale
     }
 }
 
 impl Pdf {
+    /// Opens and parses `file`. Fails for damaged or password-protected PDFs
+    /// (no password is passed).
     pub fn open(file: &gio::File) -> Result<Self, glib::Error> {
         poppler::Document::from_gfile(file, None, gio::Cancellable::NONE).map(Self)
     }
 
+    /// The number of pages.
     pub fn n_pages(&self) -> i32 {
         self.0.n_pages()
     }
 
+    /// Page `index` (from 0), or an error naming the missing page. Poppler's
+    /// own lookup doesn't range-check reliably, so check first.
     fn page(&self, index: i32) -> Result<poppler::Page, String> {
         (0..self.n_pages())
             .contains(&index)
@@ -80,6 +106,7 @@ impl Pdf {
         if !(pw > 0.0 && ph > 0.0) {
             return Err("The PDF page has no size".into());
         }
+        // 144 dpi, unless that would make the longer side exceed MAX_SIDE.
         let scale = PIXELS_PER_POINT.min(MAX_SIDE / pw.max(ph));
         Ok(PageSize { scale, width: (pw * scale).ceil() as i32, height: (ph * scale).ceil() as i32 })
     }
@@ -89,6 +116,8 @@ impl Pdf {
     pub fn painter(&self, index: i32) -> Result<impl Fn(&cairo::Context) + use<>, String> {
         let page = self.page(index)?;
         let scale = self.page_size(index)?.scale;
+        // The closure owns the page, so it can outlive this call and be used
+        // for repeated redraws (`use<>` says it borrows nothing from `self`).
         Ok(move |cr: &cairo::Context| {
             let _ = cr.save();
             cr.scale(scale, scale);
@@ -105,8 +134,11 @@ impl Pdf {
         let paint = self.painter(index)?;
         let err = |e: cairo::Error| e.to_string();
         let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, size.width, size.height).map_err(err)?;
+        // Scoped so the context is dropped (and the surface released) before
+        // the surface's pixels are handed to the texture.
         {
             let cr = cairo::Context::new(&surface).map_err(err)?;
+            // PDF pages have no background of their own: paper is white.
             cr.set_source_rgb(1.0, 1.0, 1.0);
             cr.paint().map_err(err)?;
             paint(&cr);
@@ -125,6 +157,8 @@ impl Pdf {
             return Err("The page count changed".into());
         }
         let err = |e: cairo::Error| e.to_string();
+        // The initial size doesn't matter: each page sets its own below
+        // (set_size applies to the page about to be drawn).
         let surface = cairo::PdfSurface::new(1.0, 1.0, path).map_err(err)?;
         let cr = cairo::Context::new(&surface).map_err(err)?;
         for (i, doc) in docs.iter().enumerate() {
@@ -137,6 +171,9 @@ impl Pdf {
                 w: f64::from(size.width),
                 h: f64::from(size.height),
             });
+            // Work in image pixels (like the marks) and let the scale turn
+            // them into points; then shift so the crop's corner is the page's
+            // origin and clip away everything outside the crop.
             let ppp = size.points_per_pixel();
             surface.set_size(r.w * ppp, r.h * ppp).map_err(err)?;
             cr.save().map_err(err)?;
@@ -145,6 +182,7 @@ impl Pdf {
             cr.rectangle(r.x, r.y, r.w, r.h);
             cr.clip();
             if doc.shapes.is_empty() {
+                // Nothing to blend: copy the page straight across.
                 paint(&cr);
             } else {
                 // A group, so the highlighter's multiply only blends with the page.
@@ -156,6 +194,8 @@ impl Pdf {
             cr.restore().map_err(err)?;
             cr.show_page().map_err(err)?;
         }
+        // The context holds a reference to the surface; drop it so finish()
+        // can flush and close the file.
         drop(cr);
         surface.finish();
         surface.status().map_err(err)
@@ -183,6 +223,8 @@ mod tests {
         surface.finish();
     }
 
+    /// Pages open at the right size and content; PDFs are detected by name
+    /// or content; broken files fail cleanly.
     #[test]
     fn opens_and_renders_pages() {
         let dir = std::env::temp_dir().join(format!("pygoscribe-pdf-test-{}", std::process::id()));

@@ -13,6 +13,14 @@
 //! The pages of what is open: one picture, or every page of a PDF. Each page
 //! keeps its own marks, crop and undo history. The canvas works on one page
 //! at a time; the others wait here.
+//!
+//! # Ownership of page state
+//!
+//! The current page's [`Document`] and [`History`] live on the canvas, where
+//! they are edited. Every other page's state is parked in [`Pages`]. Switching
+//! page swaps the two ([`Pages::switch`]): the canvas hands over the state it
+//! was holding and receives the new page's. This keeps undo strictly per
+//! page, and means a page's state is never in two places at once.
 
 use crate::document::{Document, History};
 use crate::pdf::Pdf;
@@ -22,14 +30,18 @@ use std::rc::Rc;
 
 /// Where the pages come from.
 pub enum Source {
+    /// A single raster image (a file or the clipboard).
     Picture(ImageSurface),
+    /// A PDF document; pages are rendered on demand.
     Pdf(Pdf),
 }
 
 /// Marks and undo history of a page that isn't on the canvas.
 #[derive(Default)]
 pub struct PageState {
+    /// The page's marks, crop and any resized image.
     pub doc: Document,
+    /// The page's undo and redo stacks.
     pub history: History,
 }
 
@@ -37,7 +49,9 @@ pub struct PageState {
 /// flicking back is instant without holding a whole document in memory.
 const CACHED_PAGES: usize = 2;
 
+/// Everything open in one window: the source and every page's state.
 pub struct Pages {
+    /// The picture or PDF the pages come from.
     pub source: Source,
     /// The file name, for the title and save names. None for the clipboard.
     pub name: Option<String>,
@@ -46,11 +60,15 @@ pub struct Pages {
     /// One per page. The current page's entry is None: its state is on the
     /// canvas.
     states: Vec<Option<PageState>>,
+    /// The index (from 0) of the page on the canvas.
     current: usize,
+    /// Recently rendered PDF pages as (index, image), most recent first, at
+    /// most [`CACHED_PAGES`] long.
     cache: Vec<(usize, ImageSurface)>,
 }
 
 impl Pages {
+    /// A single picture, which is its own one and only page.
     pub fn picture(image: ImageSurface, name: Option<String>) -> Self {
         Self { source: Source::Picture(image), name, original: None, states: vec![None], current: 0, cache: Vec::new() }
     }
@@ -59,18 +77,22 @@ impl Pages {
     pub fn pdf(pdf: Pdf, name: Option<String>) -> Self {
         let n = pdf.n_pages().max(1) as usize;
         let mut states: Vec<Option<PageState>> = (0..n).map(|_| Some(PageState::default())).collect();
+        // Page 1 starts on the canvas.
         states[0] = None;
         Self { source: Source::Pdf(pdf), name, original: None, states, current: 0, cache: Vec::new() }
     }
 
+    /// The number of pages (1 for a picture).
     pub fn len(&self) -> usize {
         self.states.len()
     }
 
+    /// The index (from 0) of the page on the canvas.
     pub fn current(&self) -> usize {
         self.current
     }
 
+    /// Whether the pages come from a PDF.
     pub fn is_pdf(&self) -> bool {
         matches!(self.source, Source::Pdf(_))
     }
@@ -88,6 +110,7 @@ impl Pages {
                 if let Some((_, s)) = self.cache.iter().find(|(i, _)| *i == index) {
                     return Ok(s.clone());
                 }
+                // A small most-recently-used cache: newest at the front.
                 let (tex, _) = pdf.render(index as i32)?;
                 let surface = crate::render::surface_from_texture(&tex).map_err(|e| e.to_string())?;
                 self.cache.insert(0, (index, surface.clone()));
@@ -105,6 +128,7 @@ impl Pages {
             Source::Pdf(pdf) => pdf
                 .page_size(index as i32)
                 .map(|s| (f64::from(s.width), f64::from(s.height)))
+                // A4 proportions if Poppler can't tell us.
                 .unwrap_or((210.0, 297.0)),
         }
     }
@@ -154,12 +178,15 @@ impl Pages {
         let err = |e: gtk::cairo::Error| e.to_string();
         match &self.source {
             Source::Picture(image) => {
+                // Use the resized image if Scale to Visible Size has run.
                 let image = doc.image.as_ref().map_or(image, |p| &p.0);
                 let size = (f64::from(image.width()), f64::from(image.height()));
                 let paint = |cr: &Context| crate::render::paint_image(cr, image);
                 crate::render::render_thumbnail(&paint, size, doc, width / size.0.max(1.0)).map_err(err)
             }
             Source::Pdf(pdf) => {
+                // Draw the PDF page as vectors straight at thumbnail size,
+                // rather than shrinking the 144 dpi render.
                 let ps = pdf.page_size(index as i32)?;
                 let paint = pdf.painter(index as i32)?;
                 let size = (f64::from(ps.width), f64::from(ps.height));
@@ -180,6 +207,7 @@ mod tests {
     use crate::document::{Kind, Shape, Style};
     use gtk::cairo;
 
+    /// A 10 × 10 rectangle at (`x`, `x`), to tell marks apart.
     fn mark(x: f64) -> Shape {
         let mut s = Shape::new(Kind::Rect, (x, x), Style::default());
         s.b = (x + 10.0, x + 10.0);

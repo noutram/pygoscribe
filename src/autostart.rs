@@ -13,11 +13,15 @@
 //! Start at login.
 //!
 //! Outside a sandbox this writes (or removes) an XDG autostart entry in
-//! `~/.config/autostart`. A snap does the same in its own config folder
+//! `~/.config/autostart`, which GNOME's session manager reads at login. A
+//! snap would do the same in its own config folder
 //! (`~/snap/pygoscribe/current/.config/autostart`), where snapd looks for the
-//! entry named by `autostart:` in snapcraft.yaml. Inside Flatpak the app can't see that folder, so it
-//! asks the Background portal instead, which writes the entry on the host, and
-//! remembers the answer in its own config folder.
+//! entry named by `autostart:` in snapcraft.yaml. (Snap packaging has been
+//! dropped, but the detection is harmless and kept.) Inside Flatpak the app
+//! can't see the host's folder, so it asks the Background portal instead,
+//! which writes the entry on the host, and remembers the answer in a marker
+//! file in its own config folder, because the portal has no way to ask
+//! whether autostart is currently on.
 
 use gtk::prelude::*;
 use gtk::{gio, glib};
@@ -27,10 +31,13 @@ use std::path::PathBuf;
 /// bar and waits for the top bar to be ready instead of opening a window.
 pub const BACKGROUND_FLAG: &str = "--background";
 
+/// Whether we are running inside Flatpak. Flatpak always mounts
+/// `/.flatpak-info` in the sandbox.
 pub fn in_flatpak() -> bool {
     std::path::Path::new("/.flatpak-info").exists()
 }
 
+/// Whether we are running inside a snap: snapd sets `$SNAP` for its apps.
 pub fn in_snap() -> bool {
     std::env::var_os("SNAP").is_some()
 }
@@ -40,6 +47,8 @@ pub fn sandboxed() -> bool {
     in_flatpak() || in_snap()
 }
 
+/// `~/.config/autostart/org.outram.Pygoscribe.desktop` (or the sandbox's
+/// own config folder when sandboxed).
 fn desktop_file() -> PathBuf {
     glib::user_config_dir()
         .join("autostart")
@@ -51,6 +60,7 @@ pub fn sandbox_marker() -> PathBuf {
     glib::user_config_dir().join("pygoscribe").join("autostart-enabled")
 }
 
+/// Whether Start at Login is on, as far as this process can tell.
 pub fn is_enabled() -> bool {
     if in_flatpak() {
         sandbox_marker().exists()
@@ -64,6 +74,8 @@ pub fn is_enabled() -> bool {
 /// what is running, otherwise the full path (for example a `cargo build`).
 fn exec_line() -> String {
     let exe = std::env::current_exe().ok();
+    // Use the bare name when the binary on $PATH is this very binary
+    // (comparing canonical paths so symlinks match).
     let on_path = exe.as_ref().is_some_and(|exe| {
         glib::find_program_in_path("pygoscribe")
             .and_then(|p| p.canonicalize().ok())
@@ -75,6 +87,8 @@ fn exec_line() -> String {
         _ if in_snap() => "pygoscribe".into(),
         Some(exe) if !on_path => {
             let s = exe.display().to_string();
+            // Desktop Entry Exec quoting: wrap in double quotes and escape
+            // backslashes and quotes when the path has reserved characters.
             if s.contains([' ', '"', '\\', '\'']) {
                 format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
             } else {
@@ -86,6 +100,8 @@ fn exec_line() -> String {
     format!("{program} {BACKGROUND_FLAG}")
 }
 
+/// The contents of the autostart `.desktop` file. `NoDisplay` keeps it out of
+/// the app grid; `X-GNOME-Autostart-enabled` is what GNOME Tweaks toggles.
 fn entry_text() -> String {
     format!(
         "[Desktop Entry]\n\
@@ -102,6 +118,8 @@ fn entry_text() -> String {
     )
 }
 
+/// Wraps an I/O (or any displayable) error as a `glib::Error`, so both the
+/// file and the portal paths return one error type.
 fn io_err(e: impl std::fmt::Display) -> glib::Error {
     glib::Error::new(gio::IOErrorEnum::Failed, &e.to_string())
 }
@@ -111,6 +129,8 @@ pub async fn set_enabled(enable: bool) -> Result<bool, glib::Error> {
     if in_flatpak() {
         let granted = request_background(enable).await?;
         let marker = sandbox_marker();
+        // Turning it off always clears the marker, even if the portal said
+        // no; turning it on only sets it if the user allowed it.
         if granted && enable {
             std::fs::create_dir_all(marker.parent().expect("has parent")).map_err(io_err)?;
             std::fs::write(&marker, b"").map_err(io_err)?;
@@ -151,11 +171,17 @@ pub fn entry_is_enabled(text: &str) -> bool {
 /// for the answer. Returns whether the request was granted.
 #[allow(deprecated)] // signal_subscribe: its replacement needs a newer GLib
 async fn request_background(autostart: bool) -> Result<bool, glib::Error> {
+    // Portal requests follow the org.freedesktop.portal.Request pattern: the
+    // method returns a request object path at once, and the real answer
+    // comes later as a Response signal on that object (0 = granted,
+    // 1 = cancelled by the user, 2 = other failure).
     let conn = gio::bus_get_future(gio::BusType::Session).await?;
 
     // Subscribe to the Response signal before calling, using the predictable
     // request path, so the answer can't arrive before we listen.
     let token = format!("pygoscribe{}", glib::random_int());
+    // The request path is .../request/<sender>/<token>, where <sender> is our
+    // unique bus name without the leading ':' and with '.' as '_'.
     let sender = conn
         .unique_name()
         .map(|n| n.trim_start_matches(':').replace('.', "_"))
@@ -181,6 +207,7 @@ async fn request_background(autostart: bool) -> Result<bool, glib::Error> {
     options.insert_value("reason", &"Start Pygoscribe in the top bar when you log in".to_variant());
     options.insert_value("autostart", &autostart.to_variant());
     options.insert_value("commandline", &vec!["pygoscribe", BACKGROUND_FLAG].to_variant());
+    // The first argument is the parent window handle; there is none.
     let params = ("", options.end()).to_variant();
 
     let call = conn
@@ -196,6 +223,7 @@ async fn request_background(autostart: bool) -> Result<bool, glib::Error> {
         )
         .await;
     let result = match call {
+        // The call succeeded; now wait for the user's answer.
         Ok(_) => Ok(rx.recv().await.unwrap_or(2) == 0),
         Err(e) => Err(e),
     };
@@ -207,6 +235,7 @@ async fn request_background(autostart: bool) -> Result<bool, glib::Error> {
 mod tests {
     use super::*;
 
+    /// The entry must start the app quietly, not open a window at login.
     #[test]
     fn entry_runs_in_background() {
         let text = entry_text();

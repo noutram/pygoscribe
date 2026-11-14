@@ -10,8 +10,8 @@
 // FOR A PARTICULAR PURPOSE. See the GNU General Public License for more
 // details.
 
-//! Carries settings and Start at Login over from GTKMarkup, the app's name up
-//! to 0.1.15 (app ID `org.outram.GtkMarkup`, config folder `gtkmarkup`).
+//! Carries settings and Start at Login over from the app's earlier ID, used
+//! up to 0.1.15 (app ID [`OLD_APP_ID`], config folder [`OLD_DIR`]).
 //!
 //! Runs once: a stamp file in the new config folder stops it repeating, so a
 //! later change made in Pygoscribe is never undone by the old files.
@@ -28,19 +28,24 @@ use crate::autostart;
 use gtk::glib;
 use std::path::{Path, PathBuf};
 
+/// The application ID used up to 0.1.15.
 const OLD_APP_ID: &str = "org.outram.GtkMarkup";
+/// The config folder name used up to 0.1.15.
 const OLD_DIR: &str = "gtkmarkup";
+/// The current config folder name.
 const NEW_DIR: &str = "pygoscribe";
+/// A file in the new config folder that marks the migration as done.
 const STAMP: &str = "migrated-from-gtkmarkup";
 
 /// What is left to do once the app is running.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Pending {
-    /// Inside Flatpak: Start at Login was on in GTKMarkup, so ask the portal.
+    /// Inside Flatpak: Start at Login was on under the old ID, so ask the portal.
     pub flatpak_autostart: bool,
 }
 
-/// Moves anything GTKMarkup left behind. Errors are only logged.
+/// Moves anything the old version left behind. Errors are only logged: a
+/// failed migration must never stop the app from starting.
 pub fn run() -> Pending {
     let new_dir = glib::user_config_dir().join(NEW_DIR);
     if new_dir.join(STAMP).exists() {
@@ -78,6 +83,8 @@ fn copy_settings(old_dir: &Path, new_dir: &Path) {
     }
 }
 
+/// The .deb and `cargo run` case: copy the settings, and replace an enabled
+/// old autostart entry with a new one (unless one exists already).
 fn migrate_host(config: &Path, new_dir: &Path) -> Pending {
     copy_settings(&config.join(OLD_DIR), new_dir);
     let old_entry = config.join("autostart").join(format!("{OLD_APP_ID}.desktop"));
@@ -88,6 +95,8 @@ fn migrate_host(config: &Path, new_dir: &Path) -> Pending {
                 return Pending::default();
             }
         }
+        // Remove it even when it was switched off: it points at a binary that
+        // no longer exists.
         let _ = std::fs::remove_file(&old_entry);
     }
     Pending::default()
@@ -98,6 +107,8 @@ fn old_flatpak_dir() -> PathBuf {
     glib::home_dir().join(".var/app").join(OLD_APP_ID).join("config").join(OLD_DIR)
 }
 
+/// The Flatpak case: copy the settings through the read-only permission and
+/// report whether the old app had Start at Login on.
 fn migrate_flatpak(new_dir: &Path) -> Pending {
     let old_dir = old_flatpak_dir();
     copy_settings(&old_dir, new_dir);
@@ -111,6 +122,7 @@ fn migrate_flatpak(new_dir: &Path) -> Pending {
 mod tests {
     use super::*;
 
+    /// A fresh, empty folder for one test, unique to this process.
     fn temp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("pygoscribe-migrate-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -118,6 +130,7 @@ mod tests {
         dir
     }
 
+    /// Settings are copied the first time and never overwrite newer ones.
     #[test]
     fn copies_settings_once() {
         let dir = temp("settings");
@@ -134,6 +147,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// With nothing to migrate, nothing is created.
     #[test]
     fn missing_old_settings_is_fine() {
         let dir = temp("none");

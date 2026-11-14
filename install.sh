@@ -73,13 +73,16 @@ cargo_tool() { # <command> <crate> [install args...]
 }
 cargo_tool deny cargo-deny
 cargo_tool about cargo-about --features cli
+# reuse needs a module to detect file encodings: libmagic (the `file`
+# package, present on a desktop install but not in minimal ones) or the
+# charset-normalizer extra, which is installed with it here.
 if ! command -v reuse >/dev/null; then
     if command -v uv >/dev/null; then
-        uv tool install reuse
+        uv tool install 'reuse[charset-normalizer]'
     elif command -v pipx >/dev/null; then
-        pipx install reuse
+        pipx install 'reuse[charset-normalizer]'
     fi
-    command -v reuse >/dev/null || die "reuse not found. Install it with: pipx install reuse (sudo apt install pipx)"
+    command -v reuse >/dev/null || die "reuse not found. Install it with: pipx install 'reuse[charset-normalizer]' (sudo apt install pipx)"
 fi
 cargo deny --log-level error check licenses
 if [[ -d vendor && ! -e .git ]]; then

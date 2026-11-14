@@ -81,7 +81,18 @@ impl PageSize {
 impl Pdf {
     /// Opens and parses `file`. Fails for damaged or password-protected PDFs
     /// (no password is passed).
+    ///
+    /// Opening is serialised through a process-wide lock. Older Poppler
+    /// (24.02, in Ubuntu 24.04) sets up its global state lazily on the first
+    /// open without any locking, so two threads opening PDFs at the same time
+    /// can corrupt the heap ("double free or corruption"). The app opens PDFs
+    /// on the main thread only, but the unit tests run on many threads at
+    /// once. Rendering and drawing pages afterwards don't need the lock.
     pub fn open(file: &gio::File) -> Result<Self, glib::Error> {
+        static OPEN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        // A panic while holding the lock can't leave Poppler half set up in
+        // a way the lock protects against, so a poisoned lock is still usable.
+        let _guard = OPEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         poppler::Document::from_gfile(file, None, gio::Cancellable::NONE).map(Self)
     }
 
@@ -372,5 +383,43 @@ mod tests {
         // A wrong number of pages is refused instead of writing a bad file.
         assert!(pdf.save_marked(&docs[..2], &dir.join("bad.pdf")).is_err());
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// A stress test for the lock in [`Pdf::open`]: many threads open and render
+/// a PDF at the same moment. Without the lock this crashed in about one run
+/// in six on Ubuntu 24.04. Run it repeatedly with
+/// `cargo test --release concurrent_opens -- --ignored`.
+#[cfg(test)]
+mod stress {
+    use super::*;
+
+    #[test]
+    #[ignore]
+    fn concurrent_opens() {
+        let path = std::env::temp_dir().join(format!("pygoscribe-pdf-race-{}.pdf", std::process::id()));
+        {
+            let surface = cairo::PdfSurface::new(100.0, 100.0, &path).unwrap();
+            let cr = cairo::Context::new(&surface).unwrap();
+            cr.show_page().unwrap();
+            drop(cr);
+            surface.finish();
+        }
+        // The barrier lines every thread up so they all open at once.
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(16));
+        let threads: Vec<_> = (0..16)
+            .map(|_| {
+                let (barrier, path) = (barrier.clone(), path.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let pdf = Pdf::open(&gio::File::for_path(&path)).unwrap();
+                    pdf.render(0).unwrap();
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        let _ = std::fs::remove_file(path);
     }
 }

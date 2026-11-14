@@ -464,6 +464,13 @@ way, and comment new code to the same standard.
 
 ## Testing tips
 
+- Poppler 24.02 (Ubuntu 24.04) sets up its global state on the first open
+  without locking, so PDFs opened on several threads at once corrupted the
+  heap ("double free or corruption") and `install.sh` failed there now and
+  then. Since 0.1.19 `Pdf::open` takes a process-wide lock. The ignored
+  stress test `cargo test --release concurrent_opens -- --ignored` checks it
+  (it crashed about 1 run in 6 on 24.04 without the lock).
+
 - Headless testing works with `dbus-run-session` + `xvfb-run` and a fake
   `org.kde.StatusNotifierWatcher` written in Python with `gi`.
 - If the app seems unchanged after a rebuild, an old instance is still running

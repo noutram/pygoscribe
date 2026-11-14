@@ -102,11 +102,6 @@ cargo test --release --locked
 ./target/release/pygoscribe --window
 ```
 
-On Ubuntu 24.04, run the tests one at a time (`cargo test --release
---locked -- --test-threads=1`): run in parallel there, the tests that draw
-text and PDFs can crash in the older system libraries. The app itself is
-unaffected, since it draws on one thread.
-
 `cargo run --release` builds and runs in one step. If Pygoscribe is already
 running in the top bar, quit it first (`pkill pygoscribe`): otherwise the
 new build hands the request to the running copy.
@@ -166,7 +161,7 @@ packages into `dist/`:
 
 ```sh
 sudo apt install pipx flatpak flatpak-builder   # pipx for reuse, below
-pipx install reuse
+pipx install 'reuse[charset-normalizer]'
 ./install.sh                    # tests, release build, dist/*.deb and dist/pygoscribe.flatpak
 ./install.sh --install flatpak  # ...and install the Flatpak for your user
 ./install.sh --install deb      # ...and install the .deb (asks for sudo)
@@ -180,8 +175,9 @@ warning.
 Before building, `install.sh` checks licensing: `cargo deny check licenses`
 (every crate's license must be on the allow-list in `deny.toml`), `reuse
 lint` (every file carries license information) and `cargo about`
-(regenerates `THIRD-PARTY-LICENSES.md`). `reuse` can also come from `uv tool
-install reuse`.
+(regenerates `THIRD-PARTY-LICENSES.md`). If you don't install `reuse` first, the script does it with `pipx` or
+`uv`. The `charset-normalizer` extra lets it work on minimal installs that
+lack the `file` package.
 
 To make the packages for a new release, run `scripts/release.sh v<version>`
 (see `docs/PROJECT_CONTEXT.md`, Releasing).

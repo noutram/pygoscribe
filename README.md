@@ -413,3 +413,8 @@ start in Pictures.
 2. ~~Markup canvas with drawing tools and editable objects~~
 3. ~~Output: copy, save and send to~~
 4. ~~Packaging (.deb and Flatpak) and start at login~~
+5. Package for Raspberry Pi
+6. User Testing
+7. First release
+8. User feedback and requirements gathering
+9. TBD :)

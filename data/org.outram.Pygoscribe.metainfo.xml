@@ -36,6 +36,11 @@
   </replaces>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.1.22" date="2026-11-20">
+      <description>
+        <p>Select several PDF pages in the sidebar with Ctrl+click, Shift+click or Ctrl+A and delete them together. One Undo puts them all back in place with their marks.</p>
+      </description>
+    </release>
     <release version="0.1.21" date="2026-11-20">
       <description>
         <p>Drag images and PDFs from the file manager, or an image from a web browser, onto a window to open them. A window that already shows a picture opens the dropped file in a new window.</p>

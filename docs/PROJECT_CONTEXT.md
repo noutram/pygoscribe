@@ -47,7 +47,7 @@ All four planned steps are done.
 | 0.1.14 | Licensed GPL-3.0-only; About window (main menu, tray); third-party notices; source tarballs on each release | Released 14 Nov (`v0.1.14`, .deb, Flatpak, src and Poppler tarballs) |
 | 0.1.15 | No-warranty disclaimer: README (GPL §15–16), About comments, metainfo, debian/copyright, source notices, `--version` | Released 14 Nov (`v0.1.15`) |
 | 0.1.20 | Reorder PDF pages by dragging thumbnails; delete pages (right-click or Delete, with Undo); Save as PDF follows the new order | Released 20 Nov (`v0.1.20`) |
-| 0.1.21 | Drag images and PDFs (or image data) onto a window to open them | On branch `feature/drop-to-open`, not released |
+| 0.1.21 | Drag images and PDFs (or image data) onto a window to open them | Released 20 Nov (`v0.1.21`) |
 
 ## Architecture
 

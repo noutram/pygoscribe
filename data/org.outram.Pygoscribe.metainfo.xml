@@ -36,6 +36,11 @@
   </replaces>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.1.21" date="2026-11-20">
+      <description>
+        <p>Drag images and PDFs from the file manager, or an image from a web browser, onto a window to open them. A window that already shows a picture opens the dropped file in a new window.</p>
+      </description>
+    </release>
     <release version="0.1.20" date="2026-11-20">
       <description>
         <p>Reorder PDF pages by dragging their thumbnails in the page sidebar, and delete pages from a thumbnail's right-click menu or with the Delete key, with Undo. Save as PDF writes the pages in their new order.</p>

@@ -29,7 +29,7 @@
 //!   it to blend only with the page (not with what is under the output) draw
 //!   the page into a group first (`push_group` / `pop_group_to_source`).
 
-use crate::document::{rotate_point, Document, HAlign, Kind, Point, Rect, Rgba, Shape, VAlign};
+use crate::document::{rotate_point, Document, HAlign, Kind, Point, Rect, Rgba, Shape, Style, VAlign};
 use gtk::cairo::{self, Context, ImageSurface};
 use gtk::gdk;
 use gtk::pango;
@@ -353,6 +353,14 @@ fn bubble_path(cr: &Context, r: &Rect) {
     cr.close_path();
 }
 
+/// Sets the line width and the dash pattern of `style` for the next stroke.
+/// `draw_shape_on` saves and restores the context, so the dash never leaks
+/// into anything drawn after the mark.
+fn set_line(cr: &Context, style: &Style) {
+    cr.set_line_width(style.width);
+    cr.set_dash(&style.line.dashes(style.width), 0.0);
+}
+
 /// Fills and outlines the current path, leaving out whichever is off.
 fn fill_and_stroke(cr: &Context, shape: &Shape) {
     if let Some(fill) = shape.style.fill {
@@ -361,7 +369,7 @@ fn fill_and_stroke(cr: &Context, shape: &Shape) {
     }
     if shape.draws_border() {
         set_color(cr, shape.style.stroke);
-        cr.set_line_width(shape.style.width);
+        set_line(cr, &shape.style);
         let _ = cr.stroke();
     } else {
         // fill_preserve kept the path; clear it so it can't leak into the
@@ -408,7 +416,7 @@ pub fn draw_shape_on(cr: &Context, background: Background, shape: &Shape) {
         Kind::Pen(pts) => {
             polyline(cr, pts);
             set_color(cr, st.stroke);
-            cr.set_line_width(st.width);
+            set_line(cr, st);
             let _ = cr.stroke();
         }
         Kind::Highlighter(pts) => {
@@ -425,7 +433,7 @@ pub fn draw_shape_on(cr: &Context, background: Background, shape: &Shape) {
             cr.move_to(shape.a.0, shape.a.1);
             cr.line_to(shape.b.0, shape.b.1);
             set_color(cr, st.stroke);
-            cr.set_line_width(st.width);
+            set_line(cr, st);
             let _ = cr.stroke();
             draw_label(cr, shape);
         }
@@ -515,8 +523,9 @@ fn draw_arrow(cr: &Context, shape: &Shape) {
         // Shaft stops inside the head so its round cap doesn't poke out of the tip.
         cr.move_to(ax, ay);
         cr.line_to(bx - ux * head * 0.7, by - uy * head * 0.7);
-        cr.set_line_width(st.width);
+        set_line(cr, st);
         let _ = cr.stroke();
+        // The head is filled, so it stays solid whatever the line style.
         cr.move_to(bx, by);
         cr.line_to(bx - head * (angle - spread).cos(), by - head * (angle - spread).sin());
         cr.line_to(bx - head * (angle + spread).cos(), by - head * (angle + spread).sin());
@@ -587,10 +596,9 @@ pub fn texture_from_surface(out: ImageSurface) -> Result<gdk::Texture, cairo::Er
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::document::Style;
 
     /// Draws `shape` on white and returns a pixel reader (r, g, b as 0–255).
-    fn draw_on_white(shape: &Shape) -> impl Fn(i32, i32) -> (u8, u8, u8) {
+    fn draw_on_white(shape: &Shape) -> impl Fn(i32, i32) -> (u8, u8, u8) + use<> {
         let mut surface = ImageSurface::create(cairo::Format::Rgb24, 200, 100).unwrap();
         {
             let cr = Context::new(&surface).unwrap();
@@ -619,6 +627,56 @@ mod tests {
         let overlap = px(173, 50);
         assert!((shaft.0 as i32 - 128).abs() <= 2, "shaft {shaft:?}");
         assert_eq!(shaft, overlap);
+    }
+
+    /// A dashed line leaves gaps where a solid one doesn't, and the gaps
+    /// grow with the width.
+    #[test]
+    fn dashed_line_has_gaps_that_scale_with_width() {
+        use crate::document::LineStyle;
+        let line = |width: f64, line: LineStyle| {
+            let style = Style { stroke: Rgba::new(0.0, 0.0, 0.0, 1.0), width, line, ..Style::default() };
+            let mut shape = Shape::new(Kind::Line, (10.0, 50.0), style);
+            shape.b = (190.0, 50.0);
+            draw_on_white(&shape)
+        };
+        let ink = |p: (u8, u8, u8)| p.0 < 128;
+        // 4 px wide: dashes show 12 px long (8 to 20), then an 8 px gap.
+        let dashed = line(4.0, LineStyle::Dashed);
+        assert!(ink(dashed(14, 50)));
+        assert!(!ink(dashed(24, 50)), "gap");
+        assert!(ink(dashed(34, 50)), "next dash");
+        let solid = line(4.0, LineStyle::Solid);
+        assert!(ink(solid(24, 50)));
+        // 8 px wide: the first dash shows from 6 to 30, so 24 is now inside
+        // it, then a 16 px gap.
+        let wide = line(8.0, LineStyle::Dashed);
+        assert!(ink(wide(24, 50)));
+        assert!(!ink(wide(40, 50)), "wider gap");
+        assert!(ink(wide(52, 50)), "next dash");
+        // Dots: 4 px circles every 8 px, centred on 10, 18, 26…
+        let dotted = line(4.0, LineStyle::Dotted);
+        assert!(ink(dotted(18, 50)));
+        assert!(!ink(dotted(22, 50)), "between dots");
+        // Dash-dot: a dash to 20, a 4 px dot centred on 30, then a dash.
+        let dash_dot = line(4.0, LineStyle::DashDot);
+        assert!(!ink(dash_dot(24, 50)), "gap before the dot");
+        assert!(ink(dash_dot(30, 50)), "the dot is drawn");
+        assert!(!ink(dash_dot(36, 50)), "gap after the dot");
+        assert!(ink(dash_dot(46, 50)), "next dash");
+    }
+
+    /// A dashed arrow still has a solid, filled head.
+    #[test]
+    fn dashed_arrow_keeps_a_solid_head() {
+        use crate::document::LineStyle;
+        let style = Style { stroke: Rgba::new(0.0, 0.0, 0.0, 1.0), width: 4.0, line: LineStyle::Dotted, ..Style::default() };
+        let mut arrow = Shape::new(Kind::Arrow, (10.0, 50.0), style);
+        arrow.b = (190.0, 50.0);
+        let px = draw_on_white(&arrow);
+        for x in [178, 182, 186] {
+            assert!(px(x, 50).0 < 128, "head at {x}");
+        }
     }
 
     /// Border off: only the fill is painted.

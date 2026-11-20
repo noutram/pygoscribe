@@ -66,7 +66,7 @@ All four planned steps are done.
 | `src/pages.rs` | What is open: one picture or every PDF page; each page's marks and undo history; thumbnails. |
 | `src/sidebar.rs` | Page sidebar: `AdwOverlaySplitView` with a `GtkListBox` of thumbnails, drawn in idle time; drag a thumbnail to reorder pages; select several (Ctrl/Shift+click, Ctrl+A) and delete them with one Undo. |
 | `src/output.rs` | Export: clipboard, save PNG/JPEG/PDF, Open With (FileLauncher / OpenURI portal), Email. |
-| `src/settings.rs` | Remembered settings: style, open/save folders, save format, in a GLib key file. |
+| `src/settings.rs` | Remembered settings: style (including line style), open/save folders, save format, in a GLib key file. |
 | `src/autostart.rs` | Start at login: `~/.config/autostart/<app id>.desktop` natively, Background portal in Flatpak. |
 | `src/migrate.rs` | One-time carry-over of settings and Start at Login from releases before 0.1.16 (old IDs are in its module comment). |
 | `build.rs` + `data/icons/resources.gresource.xml` | Bundles the `markup-*-symbolic` tool icons as a GResource. |
@@ -453,6 +453,23 @@ poppler-rs 0.26, cairo-rs 0.22 (feature `pdf`), edition 2024. Flatpak uses GNOME
   - Not done (optional step 17): offline Flatpak cargo sources via
     `flatpak-cargo-generator`; the manifest still builds with
     `--share=network`.
+- **Line style** (Nick's request 20 Nov 2026). `Style::line` is a
+  `LineStyle` (Solid, Dashed, Dotted, Dash Dot, Dash Dot Dot, Long Dash),
+  `line=` in settings.ini (stable ids such as `dash-dot`; unknown values
+  fall back to solid). It applies to pen strokes, lines, arrow shafts and
+  the borders of rectangles, ovals and bubbles; the arrow's filled head,
+  the highlighter, the loupe's rim and text stay solid. `LineStyle::dashes`
+  gives the Cairo dash array in multiples of the line width (visible dash
+  3w, long dash 6w, gap 2w, dot 1w), shortening each "on" length by w
+  because the round caps add w/2 at each end; `render::set_line` sets width
+  and dash, inside `draw_shape_on`'s save/restore. Since lengths follow the
+  width, `Document::scale` needs no change and PDF output gets real vector
+  dashes. A dot is 0.05w long, not 0: Cairo's stroker drops zero-length
+  dashes that aren't first in the pattern, so dash-dot lost its dots. The
+  toolbar control is a `GtkDropDown` after Width whose button shows only a
+  drawn sample (to keep the toolbar narrow) and whose list shows sample
+  plus name. Tests: `dashed_line_has_gaps_that_scale_with_width`,
+  `dashed_arrow_keeps_a_solid_head`.
 - **Snap was tried and abandoned** (Nick, 11 Nov: "stick with flatpak").
   `snapcraft --destructive-mode` refuses because Nick's laptop has Ubuntu Pro
   attached, and the LXD build kept failing on the Rust plugin's rustup check.

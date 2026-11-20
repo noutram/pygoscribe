@@ -18,7 +18,7 @@
 //! AdwApplicationWindow
 //! └─ AdwToolbarView
 //!    ├─ AdwHeaderBar   pages · paste · open · zoom · scale … undo · send · save · copy · menu
-//!    ├─ toolbar        tool buttons · border/fill colours · width · font · size
+//!    ├─ toolbar        tool buttons · border/fill colours · width · line style · font · size
 //!    └─ AdwToastOverlay
 //!       └─ AdwOverlaySplitView (Sidebar)
 //!          ├─ page thumbnails
@@ -39,7 +39,7 @@
 //! token straight back to GNOME Shell so its busy pointer stops.
 
 use crate::canvas::Canvas;
-use crate::document::{Rgba, Style, Tool};
+use crate::document::{LineStyle, Rgba, Style, Tool};
 use crate::pages::{PageState, Pages};
 use crate::settings::SaveFormat;
 use crate::sidebar::Sidebar;
@@ -214,6 +214,8 @@ struct StyleControls {
     fill: ColourControl,
     /// Line width.
     width: gtk::SpinButton,
+    /// Solid, dashed, dotted… (index into [`LineStyle::ALL`]).
+    line: gtk::DropDown,
     /// Text size.
     font: gtk::SpinButton,
     /// Font family and style (no size).
@@ -243,6 +245,7 @@ impl StyleControls {
         let width = gtk::SpinButton::with_range(lo, hi, 1.0);
         width.set_value(saved.width);
         width.set_tooltip_text(Some("Line Width"));
+        let line = line_style_dropdown(saved.line);
         let (lo, hi) = crate::settings::FONT_RANGE;
         let font = gtk::SpinButton::with_range(lo, hi, 2.0);
         font.set_value(saved.font_size);
@@ -285,7 +288,7 @@ impl StyleControls {
                 None
             });
         }
-        let this = Self { border_on, stroke, fill_on, fill, width, font, face, syncing: Rc::new(Cell::new(false)) };
+        let this = Self { border_on, stroke, fill_on, fill, width, line, font, face, syncing: Rc::new(Cell::new(false)) };
         // A shape needs a border or a fill: turning one off turns the other on.
         // Connected before `connect_changed`, so the change is seen as one.
         let other = this.fill_on.clone();
@@ -312,7 +315,13 @@ impl StyleControls {
             width: self.width.value(),
             font_size: self.font.value(),
             font: self.font_name(),
+            line: self.line_style(),
         }
+    }
+
+    /// The chosen line style.
+    fn line_style(&self) -> LineStyle {
+        LineStyle::ALL.get(self.line.selected() as usize).copied().unwrap_or_default()
     }
 
     /// The chosen font as a Pango description string, without a size.
@@ -334,6 +343,7 @@ impl StyleControls {
         let (border_on, fill_on) = (self.border_on.is_active(), self.fill_on.is_active());
         let (width, font_size) = (self.width.value(), self.font.value());
         let font = self.font_name();
+        let line = self.line_style();
         crate::settings::update(|s| {
             s.stroke = stroke;
             s.border_on = border_on;
@@ -342,6 +352,7 @@ impl StyleControls {
             s.width = width;
             s.font_size = font_size;
             s.font = font;
+            s.line = line;
         });
     }
 
@@ -358,6 +369,7 @@ impl StyleControls {
             self.fill.set(f);
         }
         self.width.set_value(style.width);
+        self.line.set_selected(line_index(style.line));
         self.font.set_value(style.font_size);
         // Only when it differs: setting it re-emits notify and rebuilds labels.
         if self.font_name() != style.font {
@@ -390,9 +402,67 @@ impl StyleControls {
         let e = emit.clone();
         self.width.connect_value_changed(move |_| e());
         let e = emit.clone();
+        self.line.connect_selected_notify(move |_| e());
+        let e = emit.clone();
         self.font.connect_value_changed(move |_| e());
         self.face.connect_font_desc_notify(move |_| emit());
     }
+}
+
+/// The position of `style` in [`LineStyle::ALL`] (and the drop-down).
+fn line_index(style: LineStyle) -> u32 {
+    LineStyle::ALL.iter().position(|&s| s == style).unwrap_or(0) as u32
+}
+
+/// The Line Style drop-down. The button shows just a sample of the chosen
+/// pattern, to keep the tool bar narrow; the list shows each sample with
+/// its name. Samples are drawn in the text colour, with the same dash
+/// pattern (and round caps) as the marks.
+fn line_style_dropdown(selected: LineStyle) -> gtk::DropDown {
+    let names: Vec<&str> = LineStyle::ALL.iter().map(|s| s.label()).collect();
+    let dropdown = gtk::DropDown::from_strings(&names);
+    dropdown.set_tooltip_text(Some("Line Style"));
+    dropdown.set_selected(line_index(selected));
+    let factory = |with_name: bool| {
+        let f = gtk::SignalListItemFactory::new();
+        f.connect_setup(move |_, item| {
+            let Some(item) = item.downcast_ref::<gtk::ListItem>() else { return };
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            let sample = gtk::DrawingArea::builder().content_width(56).content_height(16).valign(gtk::Align::Center).build();
+            row.append(&sample);
+            if with_name {
+                row.append(&gtk::Label::new(None));
+            }
+            item.set_child(Some(&row));
+        });
+        f.connect_bind(move |_, item| {
+            let Some(item) = item.downcast_ref::<gtk::ListItem>() else { return };
+            let style = LineStyle::ALL.get(item.position() as usize).copied().unwrap_or_default();
+            let Some(row) = item.child() else { return };
+            if let Some(sample) = row.first_child().and_downcast::<gtk::DrawingArea>() {
+                sample.set_draw_func(move |area, cr, w, h| {
+                    let width = 3.0;
+                    let c = area.color();
+                    cr.set_source_rgba(c.red().into(), c.green().into(), c.blue().into(), c.alpha().into());
+                    cr.set_line_width(width);
+                    cr.set_line_cap(gtk::cairo::LineCap::Round);
+                    cr.set_dash(&style.dashes(width), 0.0);
+                    let y = f64::from(h) / 2.0;
+                    cr.move_to(width, y);
+                    cr.line_to(f64::from(w) - width, y);
+                    let _ = cr.stroke();
+                });
+                sample.queue_draw();
+            }
+            if let Some(name) = row.last_child().and_downcast::<gtk::Label>() {
+                name.set_label(style.label());
+            }
+        });
+        f
+    };
+    dropdown.set_factory(Some(&factory(false)));
+    dropdown.set_list_factory(Some(&factory(true)));
+    dropdown
 }
 
 /// A dimmed caption for a tool-bar control ("Width", "Text").
@@ -562,6 +632,7 @@ impl MarkupWindow {
         toolbar.append(&style.fill.widget);
         toolbar.append(&label("Width"));
         toolbar.append(&style.width);
+        toolbar.append(&style.line);
         toolbar.append(&label("Text"));
         toolbar.append(&style.face);
         toolbar.append(&style.font);

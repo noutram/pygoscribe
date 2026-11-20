@@ -19,7 +19,7 @@
 //! sandbox permissions or installed GSettings schema are needed. A missing or
 //! unreadable file, or a bad value, falls back to the defaults.
 
-use crate::document::{Rgba, Style};
+use crate::document::{LineStyle, Rgba, Style};
 use gtk::{gio, glib};
 use gtk::prelude::*;
 use std::cell::RefCell;
@@ -106,6 +106,8 @@ pub struct Settings {
     pub font_size: f64,
     /// Pango font description without a size.
     pub font: String,
+    /// Dash pattern of lines and borders.
+    pub line: LineStyle,
     /// Where the Open dialog starts.
     pub open_folder: Option<PathBuf>,
     /// Where the Save dialogs start.
@@ -136,6 +138,7 @@ impl Default for Settings {
             width: style.width,
             font_size: style.font_size,
             font: style.font,
+            line: style.line,
             open_folder: None,
             save_folder: None,
             save_format: SaveFormat::Png,
@@ -182,6 +185,9 @@ impl Settings {
                 s.font = f.to_string();
             }
         }
+        if let Some(l) = kf.string(STYLE, "line").ok().and_then(|l| LineStyle::from_id(&l)) {
+            s.line = l;
+        }
         s.open_folder = read_folder(&kf, "open");
         s.save_folder = read_folder(&kf, "save");
         s.save_format = match kf.string(SAVE, "format").ok().as_deref() {
@@ -208,6 +214,7 @@ impl Settings {
         kf.set_double(STYLE, "width", self.width);
         kf.set_double(STYLE, "font-size", self.font_size);
         kf.set_string(STYLE, "font", &self.font);
+        kf.set_string(STYLE, "line", self.line.id());
         for (key, dir) in [("open", &self.open_folder), ("save", &self.save_folder)] {
             if let Some(dir) = dir {
                 kf.set_string(FOLDERS, key, &dir.to_string_lossy());
@@ -367,6 +374,7 @@ mod tests {
             width: 7.0,
             font_size: 42.0,
             font: "DejaVu Serif Bold Italic".into(),
+            line: LineStyle::DashDot,
             open_folder: Some(dir.clone()),
             save_folder: Some(dir.clone()),
             save_format: SaveFormat::Jpeg,
@@ -383,7 +391,7 @@ mod tests {
         let path = dir.join("settings.ini");
         std::fs::write(
             &path,
-            "[style]\nstroke=1;2;3\nfill=0.1;0.2;0.3;9\nwidth=1000\nfont-size=nan\nfont=  \n\
+            "[style]\nstroke=1;2;3\nfill=0.1;0.2;0.3;9\nwidth=1000\nfont-size=nan\nfont=  \nline=wavy\n\
              [folders]\nopen=/does/not/exist\nsave=relative/path\n[save]\nformat=gif\n",
         )
         .unwrap();
@@ -394,6 +402,7 @@ mod tests {
         assert_eq!(s.width, WIDTH_RANGE.1);
         assert_eq!(s.font_size, d.font_size);
         assert_eq!(s.font, d.font);
+        assert_eq!(s.line, d.line);
         assert_eq!(s.open_folder, None);
         assert_eq!(s.save_folder, None);
         assert_eq!(s.save_format, SaveFormat::Png);

@@ -49,6 +49,7 @@ All four planned steps are done.
 | 0.1.20 | Reorder PDF pages by dragging thumbnails; delete pages (right-click or Delete, with Undo); Save as PDF follows the new order | Released 20 Nov (`v0.1.20`) |
 | 0.1.21 | Drag images and PDFs (or image data) onto a window to open them | Released 20 Nov (`v0.1.21`) |
 | 0.1.22 | Select several pages in the sidebar (Ctrl/Shift+click, Ctrl+A) and delete them together, with one Undo | Released 20 Nov (`v0.1.22`) |
+| 0.1.23 | Line style (solid, dashed, dotted, dash dot, dash dot dot, long dash) for drawing, lines, arrows and shape borders | Released 20 Nov (`v0.1.23`) |
 
 ## Architecture
 
@@ -453,7 +454,7 @@ poppler-rs 0.26, cairo-rs 0.22 (feature `pdf`), edition 2024. Flatpak uses GNOME
   - Not done (optional step 17): offline Flatpak cargo sources via
     `flatpak-cargo-generator`; the manifest still builds with
     `--share=network`.
-- **Line style** (Nick's request 20 Nov 2026). `Style::line` is a
+- **Line style** (0.1.23, Nick's request 20 Nov 2026). `Style::line` is a
   `LineStyle` (Solid, Dashed, Dotted, Dash Dot, Dash Dot Dot, Long Dash),
   `line=` in settings.ini (stable ids such as `dash-dot`; unknown values
   fall back to solid). It applies to pen strokes, lines, arrow shafts and

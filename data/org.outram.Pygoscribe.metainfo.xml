@@ -36,6 +36,11 @@
   </replaces>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.1.23" date="2026-11-20">
+      <description>
+        <p>Choose a line style (solid, dashed, dotted, dash dot, dash dot dot or long dash) for drawing, lines, arrows and shape borders. Dashes scale with the line width and are kept in PNG, JPEG and PDF output.</p>
+      </description>
+    </release>
     <release version="0.1.22" date="2026-11-20">
       <description>
         <p>Select several PDF pages in the sidebar with Ctrl+click, Shift+click or Ctrl+A and delete them together. One Undo puts them all back in place with their marks.</p>

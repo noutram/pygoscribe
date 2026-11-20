@@ -361,9 +361,13 @@ dragging a file onto a window accept PDFs. The whole document opens, with page 1
   are renumbered. Moving pages can't be undone with Ctrl+Z; drag the page
   back instead.
 - **Deleting pages.** Right-click a thumbnail and choose **Delete Page**, or
-  select it and press **Delete**. Click **Undo** on the message that appears
-  to put the page back with its marks. If you delete the page you're on, the
-  next one opens. A document always keeps at least one page.
+  select it and press **Delete**. To delete several at once, Ctrl+click
+  thumbnails to add or remove them, Shift+click to select a run of pages, or
+  press **Ctrl+A** in the sidebar to select them all, then press **Delete** or
+  right-click one of them and choose **Delete N Pages**. Click **Undo** on the
+  message that appears to put every deleted page back in its place with its
+  marks. If you delete the page you're on, the nearest page that stays opens.
+  A document always keeps at least one page.
 - **Saving.** **Save as PDF…** writes every page, with your marks, as a new
   PDF in their current order, leaving out deleted ones (suggested name "name-marked.pdf"). The pages
   are copied as vectors, so

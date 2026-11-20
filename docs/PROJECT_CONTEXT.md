@@ -48,6 +48,7 @@ All four planned steps are done.
 | 0.1.15 | No-warranty disclaimer: README (GPL §15–16), About comments, metainfo, debian/copyright, source notices, `--version` | Released 14 Nov (`v0.1.15`) |
 | 0.1.20 | Reorder PDF pages by dragging thumbnails; delete pages (right-click or Delete, with Undo); Save as PDF follows the new order | Released 20 Nov (`v0.1.20`) |
 | 0.1.21 | Drag images and PDFs (or image data) onto a window to open them | Released 20 Nov (`v0.1.21`) |
+| next | Select several pages in the sidebar (Ctrl/Shift+click, Ctrl+A) and delete them together, with one Undo | On branch `feature/multi-delete-pages`, not released |
 
 ## Architecture
 
@@ -63,7 +64,7 @@ All four planned steps are done.
 | `src/render.rs` | Cairo drawing, shared by the on-screen canvas and full-resolution export. |
 | `src/pdf.rs` | PDFs via poppler: detect, page sizes, render a page, draw it as vectors, save every page with marks (`save_marked`). |
 | `src/pages.rs` | What is open: one picture or every PDF page; each page's marks and undo history; thumbnails. |
-| `src/sidebar.rs` | Page sidebar: `AdwOverlaySplitView` with a `GtkListBox` of thumbnails, drawn in idle time; drag a thumbnail to reorder pages, right-click to delete one. |
+| `src/sidebar.rs` | Page sidebar: `AdwOverlaySplitView` with a `GtkListBox` of thumbnails, drawn in idle time; drag a thumbnail to reorder pages; select several (Ctrl/Shift+click, Ctrl+A) and delete them with one Undo. |
 | `src/output.rs` | Export: clipboard, save PNG/JPEG/PDF, Open With (FileLauncher / OpenURI portal), Email. |
 | `src/settings.rs` | Remembered settings: style, open/save folders, save format, in a GLib key file. |
 | `src/autostart.rs` | Start at login: `~/.config/autostart/<app id>.desktop` natively, Background portal in Flatpak. |
@@ -289,6 +290,24 @@ poppler-rs 0.26, cairo-rs 0.22 (feature `pdf`), edition 2024. Flatpak uses GNOME
   button that calls `Pages::restore_page` with the saved state, guarded by
   `Pages::id` so it does nothing once another document is open. The last
   page can't be deleted. Pictures have no menu.
+- **Deleting several pages** (Nick's request 20 Nov 2026). The page list is
+  a `GtkListBox` in `Multiple` selection mode with
+  `activate-on-single-click` off, which is what makes it honour Ctrl+click
+  (toggle) and Shift+click (range); Ctrl+A is the list's own `select-all`
+  binding. A plain click (or arrow key) emits `row-selected` and goes to
+  the page. GTK 4.22 emits `row-selected` for a Ctrl+click too (with the
+  row, or NULL when it is deselected), so the handler only goes to a page
+  when exactly one row is selected; otherwise the click just changes the
+  selection. `Sidebar::select` unselects all first, so any page change or
+  move resets the selection to the current page. Delete deletes all
+  selected rows; a row's menu says "Delete N Pages" and deletes the
+  selection if the row is in it, otherwise just that row. The window's
+  `delete_pages` goes to the nearest page that stays (next first) if the
+  current one is selected, refuses to delete every page, and calls
+  `Pages::delete_pages` (last first, returns (position, source page,
+  state) ascending); the single Undo calls `Pages::restore_pages`, which
+  restores in ascending order so each page lands at its old position.
+  Dragging still moves one page.
 - **Drag and drop to open** (0.1.21, Nick's request 20 Nov 2026). One
   `GtkDropTarget` on the window's `AdwToolbarView` takes `GdkFileList`
   (Nautilus, and the document portal under Flatpak) or `GdkTexture` (image

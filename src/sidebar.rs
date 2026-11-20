@@ -47,8 +47,8 @@ const SCROLL_STEP: f64 = 14.0;
 
 /// What [`Sidebar::connect_page_moved`] calls: (from, to).
 type MoveHandler = Box<dyn Fn(usize, usize)>;
-/// What [`Sidebar::connect_delete_requested`] calls: (index).
-type DeleteHandler = dyn Fn(usize);
+/// What [`Sidebar::connect_delete_requested`] calls: (positions).
+type DeleteHandler = dyn Fn(Vec<usize>);
 
 /// The widgets of one page's row that change after it is built.
 struct Row {
@@ -85,7 +85,7 @@ struct Inner {
     on_move: RefCell<Option<MoveHandler>>,
     /// Whether the pages are a PDF's, which can be moved and deleted.
     pdf: Cell<bool>,
-    /// Called with a page's position when the user asks to delete it.
+    /// Called with the pages' positions when the user asks to delete them.
     on_delete: RefCell<Option<Box<DeleteHandler>>>,
     /// The position of the page being dragged, while one is. Only drags that
     /// start in this sidebar are accepted, so a page can't be dropped into
@@ -108,7 +108,11 @@ impl Sidebar {
     pub fn new(content: &impl IsA<gtk::Widget>) -> Self {
         let list = gtk::ListBox::new();
         list.add_css_class("navigation-sidebar");
-        list.set_selection_mode(gtk::SelectionMode::Single);
+        // Ctrl+click, Shift+click and Ctrl+A select several pages to delete
+        // at once. A plain click still selects one and goes to it. The list
+        // only honours the modifiers when a single click doesn't activate.
+        list.set_selection_mode(gtk::SelectionMode::Multiple);
+        list.set_activate_on_single_click(false);
         let scroller = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
             .vscrollbar_policy(gtk::PolicyType::Automatic)
@@ -163,7 +167,7 @@ impl Sidebar {
     }
 
     /// The `sidebar.delete-page(u)` action that page menus use, and the
-    /// Delete key on the selected row.
+    /// Delete key on the selected rows.
     fn add_delete_action(&self) {
         let group = gio::SimpleActionGroup::new();
         let action = gio::SimpleAction::new("delete-page", Some(glib::VariantTy::UINT32));
@@ -183,10 +187,13 @@ impl Sidebar {
                 return glib::Propagation::Proceed;
             }
             // Only PDF pages can be deleted.
-            let Some(row) = inner.list.selected_row().filter(|_| inner.pdf.get()) else {
+            let selected = selected_indices(&inner.list);
+            if !inner.pdf.get() || selected.is_empty() {
                 return glib::Propagation::Proceed;
-            };
-            request_delete(&inner, row.index().max(0) as usize);
+            }
+            if let Some(f) = &*inner.on_delete.borrow() {
+                f(selected);
+            }
             glib::Propagation::Stop
         });
         self.0.list.add_controller(keys);
@@ -309,7 +316,9 @@ impl Sidebar {
         self.0.list.connect_row_selected(move |_, row| {
             let (Some(inner), Some(row)) = (weak.upgrade(), row) else { return };
             // Ignore selections the app made itself (`select`, `rebuild`).
-            if !inner.syncing.get() && row.index() >= 0 {
+            // GTK 4.22 also reports a Ctrl+click that adds a row to the
+            // selection here; only a row selected on its own is a page click.
+            if !inner.syncing.get() && row.index() >= 0 && inner.list.selected_rows().len() == 1 {
                 f(row.index() as usize);
             }
         });
@@ -377,10 +386,11 @@ impl Sidebar {
         Row { row, number, picture, dot }
     }
 
-    /// Calls `f(index)` when the user asks to delete the page at position
-    /// `index` (Delete Page in its menu, or the Delete key on its row). The
-    /// handler deletes it and then calls [`Sidebar::remove_row`].
-    pub fn connect_delete_requested(&self, f: impl Fn(usize) + 'static) {
+    /// Calls `f(indices)` when the user asks to delete the pages at those
+    /// positions (in ascending order): Delete Page in a row's menu, or the
+    /// Delete key on the selected rows. The handler deletes them and then
+    /// calls [`Sidebar::remove_row`] for each, last first.
+    pub fn connect_delete_requested(&self, f: impl Fn(Vec<usize>) + 'static) {
         *self.0.on_delete.borrow_mut() = Some(Box::new(f));
     }
 
@@ -425,11 +435,12 @@ impl Sidebar {
         q.push_front(index);
     }
 
-    /// Highlights page `index` and scrolls it into view.
+    /// Highlights page `index` alone and scrolls it into view.
     pub fn select(&self, index: usize) {
         let inner = &self.0;
         let Some(row) = inner.list.row_at_index(index as i32) else { return };
         inner.syncing.set(true);
+        inner.list.unselect_all();
         inner.list.select_row(Some(&row));
         inner.syncing.set(false);
         // Scroll once the row has a place in the list.
@@ -504,11 +515,26 @@ impl Sidebar {
     }
 }
 
-/// Passes a delete request for page `index` to the window, if it listens.
+/// Passes a delete request from page `index`'s menu to the window, if it
+/// listens: for all the selected pages if `index` is one of them, otherwise
+/// for that page alone.
 fn request_delete(inner: &Inner, index: usize) {
     if let Some(f) = &*inner.on_delete.borrow() {
-        f(index);
+        f(pages_to_delete(&selected_indices(&inner.list), index));
     }
+}
+
+/// The pages a delete from page `index`'s menu applies to, given the
+/// `selected` ones: the whole selection if it includes `index`.
+fn pages_to_delete(selected: &[usize], index: usize) -> Vec<usize> {
+    if selected.contains(&index) { selected.to_vec() } else { vec![index] }
+}
+
+/// The positions of the selected rows, in ascending order.
+fn selected_indices(list: &gtk::ListBox) -> Vec<usize> {
+    let mut v: Vec<usize> = list.selected_rows().iter().filter_map(|r| usize::try_from(r.index()).ok()).collect();
+    v.sort_unstable();
+    v
 }
 
 /// Numbers the rows 1, 2, 3… in list order, on screen and for screen readers.
@@ -521,6 +547,7 @@ fn renumber(rows: &[Row]) {
 
 /// A right-click menu on a page row with Delete Page, which runs the
 /// sidebar's `sidebar.delete-page` action for the row's current position.
+/// On a row that is one of several selected, it deletes them all.
 fn add_context_menu(row: &gtk::ListBoxRow) {
     let click = gtk::GestureClick::new();
     click.set_button(gdk::BUTTON_SECONDARY);
@@ -531,7 +558,12 @@ fn add_context_menu(row: &gtk::ListBoxRow) {
         gesture.set_state(gtk::EventSequenceState::Claimed);
         // Built on each click, since dragging changes the row's position.
         let menu = gio::Menu::new();
-        let item = gio::MenuItem::new(Some("_Delete Page"), None);
+        let n = row
+            .parent()
+            .and_downcast::<gtk::ListBox>()
+            .map_or(1, |list| pages_to_delete(&selected_indices(&list), index as usize).len());
+        let label = if n > 1 { format!("_Delete {n} Pages") } else { "_Delete Page".to_owned() };
+        let item = gio::MenuItem::new(Some(&label), None);
         item.set_action_and_target_value(Some("sidebar.delete-page"), Some(&index.to_variant()));
         menu.append_item(&item);
         let popover = gtk::PopoverMenu::from_model(Some(&menu));
@@ -699,6 +731,23 @@ mod tests {
         let labels: Vec<String> = sidebar.0.rows.borrow().iter().map(|r| r.number.label().to_string()).collect();
         assert_eq!(labels, ["1", "2", "3", "4"]);
         assert_eq!(sidebar.0.queue.borrow().front(), Some(&1), "its thumbnail is drawn next");
+
+        // Several rows can be selected; `select` goes back to one.
+        let list = &sidebar.0.list;
+        sidebar.select(0);
+        list.select_row(list.row_at_index(3).as_ref());
+        list.select_row(list.row_at_index(1).as_ref());
+        assert_eq!(selected_indices(list), [0, 1, 3]);
+        sidebar.select(2);
+        assert_eq!(selected_indices(list), [2]);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A row's Delete Page deletes the whole selection only if the row is in it.
+    #[test]
+    fn menu_delete_applies_to_the_selection_it_is_in() {
+        assert_eq!(pages_to_delete(&[1, 3, 4], 3), [1, 3, 4]);
+        assert_eq!(pages_to_delete(&[1, 3, 4], 2), [2]);
+        assert_eq!(pages_to_delete(&[], 0), [0]);
     }
 }

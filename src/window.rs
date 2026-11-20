@@ -630,7 +630,7 @@ impl MarkupWindow {
         }
         {
             let w = this.clone();
-            this.sidebar.connect_delete_requested(move |i| w.delete_page(i));
+            this.sidebar.connect_delete_requested(move |i| w.delete_pages(i));
         }
 
         for (tool, button) in &tool_buttons {
@@ -1418,60 +1418,73 @@ impl MarkupWindow {
         self.toast(&format!("Moved page {} to {}", from + 1, to + 1));
     }
 
-    /// Deletes the page at position `index` (from the sidebar), with an Undo
-    /// button on the toast that confirms it. Deleting the page on the canvas
-    /// shows the next page (or the previous, for the last) first. Save as PDF
-    /// leaves deleted pages out.
-    fn delete_page(&self, index: usize) {
+    /// Deletes the pages at positions `indices` (from the sidebar: one, or
+    /// all the selected ones), with an Undo button on the toast that puts
+    /// them all back. Deleting the page on the canvas shows the nearest page
+    /// that stays first, the next one if there is one. Save as PDF leaves
+    /// deleted pages out.
+    fn delete_pages(&self, mut indices: Vec<usize>) {
         let (len, current) = match self.pages.borrow().as_ref() {
             Some(p) if p.is_pdf() => (p.len(), p.current()),
             _ => return,
         };
-        if index >= len {
+        indices.sort_unstable();
+        indices.dedup();
+        indices.retain(|&i| i < len);
+        if indices.is_empty() {
             return;
         }
-        if len < 2 {
+        if indices.len() >= len {
             self.toast("A document needs at least one page");
             return;
         }
-        if index == current {
-            let to = if index + 1 < len { index + 1 } else { index - 1 };
+        if indices.contains(&current) {
+            let keep = |i: &usize| !indices.contains(i);
+            let Some(to) = (current + 1..len).find(keep).or_else(|| (0..current).rev().find(keep)) else { return };
             self.go_to_page(to);
             if self.pages.borrow().as_ref().map(Pages::current) != Some(to) {
                 return; // The page couldn't be shown; go_to_page said why.
             }
         }
-        let (id, page, state, current) = {
+        let (id, deleted, current) = {
             let mut pages = self.pages.borrow_mut();
             let Some(p) = pages.as_mut() else { return };
-            let Some((page, state)) = p.delete_page(index) else { return };
-            (p.id(), page, state, p.current())
+            let Some(deleted) = p.delete_pages(&indices) else { return };
+            (p.id(), deleted, p.current())
         };
-        self.sidebar.remove_row(index);
+        for &i in indices.iter().rev() {
+            self.sidebar.remove_row(i);
+        }
         self.sidebar.select(current);
         self.update_title();
 
-        let toast = adw::Toast::new(&format!("Deleted page {}", index + 1));
+        let msg = match indices.as_slice() {
+            [one] => format!("Deleted page {}", one + 1),
+            many => format!("Deleted {} pages", many.len()),
+        };
+        let toast = adw::Toast::new(&msg);
         toast.set_button_label(Some("_Undo"));
-        // The toast's handler is Fn; the page can only be put back once.
-        let deleted = RefCell::new(Some((page, state)));
+        // The toast's handler is Fn; the pages can only be put back once.
+        let deleted = RefCell::new(Some(deleted));
         let w = self.clone();
         toast.connect_button_clicked(move |_| {
-            if let Some((page, state)) = deleted.borrow_mut().take() {
-                w.restore_page(id, index, page, state);
+            if let Some(deleted) = deleted.borrow_mut().take() {
+                w.restore_pages(id, deleted);
             }
         });
         self.toasts.add_toast(toast);
     }
 
-    /// Undo for [`Self::delete_page`]: puts the page back where it was, with
-    /// its marks and history, unless another document has been opened since.
-    fn restore_page(&self, id: u64, index: usize, page: usize, state: PageState) {
+    /// Undo for [`Self::delete_pages`]: puts the pages back where they were,
+    /// with their marks and history, unless another document has been
+    /// opened since.
+    fn restore_pages(&self, id: u64, deleted: Vec<(usize, usize, PageState)>) {
         {
             let mut pages = self.pages.borrow_mut();
             let Some(p) = pages.as_mut().filter(|p| p.id() == id) else { return };
-            let index = p.restore_page(index, page, state);
-            self.sidebar.insert_row(p, index);
+            for index in p.restore_pages(deleted) {
+                self.sidebar.insert_row(p, index);
+            }
             self.sidebar.select(p.current());
         }
         self.update_title();

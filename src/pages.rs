@@ -171,6 +171,44 @@ impl Pages {
         index
     }
 
+    /// Deletes the pages at `indices` together. None of them may be the
+    /// current page, and at least one page must be left. Returns, in
+    /// ascending position order, each page's (position, source page, state),
+    /// which [`Pages::restore_pages`] takes to put them all back. None (and
+    /// nothing changes) if they can't all be deleted.
+    pub fn delete_pages(&mut self, indices: &[usize]) -> Option<Vec<(usize, usize, PageState)>> {
+        let mut sorted = indices.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        let n = self.len();
+        if sorted.is_empty()
+            || sorted.len() >= n
+            || sorted.last().is_some_and(|&i| i >= n)
+            || sorted.contains(&self.current)
+        {
+            return None;
+        }
+        // From the back, so earlier positions stay valid.
+        let mut deleted: Vec<_> = sorted
+            .iter()
+            .rev()
+            .map(|&i| {
+                let (page, state) = self.delete_page(i).expect("checked above");
+                (i, page, state)
+            })
+            .collect();
+        deleted.reverse();
+        Some(deleted)
+    }
+
+    /// Undo for [`Pages::delete_pages`]: puts each page back at its old
+    /// position. Returns the positions they went to.
+    pub fn restore_pages(&mut self, deleted: Vec<(usize, usize, PageState)>) -> Vec<usize> {
+        // In ascending order, each page's old position is right again once
+        // the pages before it are back.
+        deleted.into_iter().map(|(i, page, state)| self.restore_page(i, page, state)).collect()
+    }
+
     /// A number identifying this set of pages, so a stale Undo for a
     /// document that has since been replaced can be told apart.
     pub fn id(&self) -> u64 {
@@ -440,6 +478,43 @@ mod tests {
         pages.delete_page(0).unwrap();
         assert_eq!(pages.len(), 1);
         assert!(pages.delete_page(0).is_none());
+    }
+
+    /// Several pages go at once and one undo puts them all back in place
+    /// with their marks. The current page and the last page left can't go.
+    #[test]
+    fn deleting_and_restoring_several_pages() {
+        let image = ImageSurface::create(cairo::Format::ARgb32, 10, 10).unwrap();
+        let mut pages = Pages::picture(image, None);
+        pages.states = (0..6).map(|_| Some(PageState::default())).collect();
+        pages.order = vec![5, 4, 3, 2, 1, 0];
+        pages.states[3] = None;
+        pages.current = 3;
+        for i in [0, 4, 5] {
+            pages.states[i].as_mut().unwrap().doc.shapes.push(mark(i as f64));
+        }
+
+        assert!(pages.delete_pages(&[1, 3]).is_none(), "the current page stays");
+        assert!(pages.delete_pages(&[0, 6]).is_none(), "out of range");
+        assert!(pages.delete_pages(&[]).is_none());
+        assert_eq!(pages.len(), 6, "nothing changed");
+
+        let deleted = pages.delete_pages(&[5, 0, 4, 0]).unwrap();
+        assert_eq!(deleted.iter().map(|d| (d.0, d.1)).collect::<Vec<_>>(), vec![(0, 5), (4, 1), (5, 0)]);
+        assert_eq!(pages.order(), &[4, 3, 2]);
+        assert_eq!(pages.current(), 2);
+
+        assert_eq!(pages.restore_pages(deleted), vec![0, 4, 5]);
+        assert_eq!(pages.order(), &[5, 4, 3, 2, 1, 0]);
+        assert_eq!(pages.current(), 3);
+        for i in [0, 4, 5] {
+            assert_eq!(pages.doc(i).unwrap().shapes[0].a.0, i as f64, "marks came back");
+        }
+
+        // Every page but the current one can go, but not all of them.
+        assert!(pages.delete_pages(&[0, 1, 2, 3, 4, 5]).is_none());
+        assert_eq!(pages.delete_pages(&[0, 1, 2, 4, 5]).unwrap().len(), 5);
+        assert_eq!((pages.len(), pages.current()), (1, 0));
     }
 
     #[test]

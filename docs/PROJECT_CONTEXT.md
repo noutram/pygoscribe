@@ -46,6 +46,7 @@ All four planned steps are done.
 | 0.1.13 | Text in rectangles, ovals, bubbles, lines and arrows, with alignment | Released 13 Nov (`v0.1.13`, Gitea pre-release with .deb and Flatpak) |
 | 0.1.14 | Licensed GPL-3.0-only; About window (main menu, tray); third-party notices; source tarballs on each release | Released 14 Nov (`v0.1.14`, .deb, Flatpak, src and Poppler tarballs) |
 | 0.1.15 | No-warranty disclaimer: README (GPL §15–16), About comments, metainfo, debian/copyright, source notices, `--version` | Released 14 Nov (`v0.1.15`) |
+| 0.1.20 | Reorder PDF pages by dragging thumbnails; delete pages (right-click or Delete, with Undo); Save as PDF follows the new order | Released 20 Nov (`v0.1.20`) |
 
 ## Architecture
 
@@ -266,8 +267,7 @@ poppler-rs 0.26, cairo-rs 0.22 (feature `pdf`), edition 2024. Flatpak uses GNOME
   (poppler/cairo can't copy PDF structure; keeping them would need
   something like `lopdf`). PNG/JPEG/Copy/Send use the current page; names
   default to `name-marked.pdf` / `name-page3.png`.
-- **Reordering pages** (unreleased, branch `feature/reorder-pages`, Nick's
-  request 20 Nov 2026). Thumbnails are dragged in the sidebar (a
+- **Reordering pages** (0.1.20, Nick's request 20 Nov 2026). Thumbnails are dragged in the sidebar (a
   `GtkDragSource` per row, one `GtkDropTarget` on the list). A 3 px accent
   line above or below the row under the pointer shows where the page lands,
   and the list auto-scrolls within 48 px of its edges. `Pages` indexes
@@ -279,8 +279,7 @@ poppler-rs 0.26, cairo-rs 0.22 (feature `pdf`), edition 2024. Flatpak uses GNOME
   (`pages::moved_index`). Drags are only accepted from the same sidebar, so
   a page can't be dropped into another window. Moving isn't on the undo
   stack, since undo is per page; drag it back instead.
-- **Deleting pages** (unreleased, same branch, Nick's request 20 Nov
-  2026). Delete Page in a thumbnail's right-click menu (a
+- **Deleting pages** (0.1.20, Nick's request 20 Nov 2026). Delete Page in a thumbnail's right-click menu (a
   `sidebar.delete-page(u)` action on the list) or the Delete key on the
   selected row. Deleting the current page first goes to the next page (the
   previous one for the last). `Pages::delete_page` drops the position from

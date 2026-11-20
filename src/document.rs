@@ -87,6 +87,85 @@ pub enum Tool {
 /// The font new text uses before the user picks one.
 pub const DEFAULT_FONT: &str = "Sans";
 
+/// The dash pattern of a stroked line: freehand pen strokes, lines, arrow
+/// shafts and the borders of rectangles, ovals and bubbles. Highlighter
+/// strokes, the loupe's rim and text are always solid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LineStyle {
+    /// An unbroken line.
+    #[default]
+    Solid,
+    /// Medium dashes.
+    Dashed,
+    /// Round dots.
+    Dotted,
+    /// Dash, dot, dash, dot.
+    DashDot,
+    /// Dash, dot, dot.
+    DashDotDot,
+    /// Long dashes.
+    LongDash,
+}
+
+impl LineStyle {
+    /// Every style, in the order the tool bar lists them.
+    pub const ALL: [LineStyle; 6] =
+        [LineStyle::Solid, LineStyle::Dashed, LineStyle::Dotted, LineStyle::DashDot, LineStyle::DashDotDot, LineStyle::LongDash];
+
+    /// A stable name, stored in the settings file.
+    pub fn id(self) -> &'static str {
+        match self {
+            LineStyle::Solid => "solid",
+            LineStyle::Dashed => "dashed",
+            LineStyle::Dotted => "dotted",
+            LineStyle::DashDot => "dash-dot",
+            LineStyle::DashDotDot => "dash-dot-dot",
+            LineStyle::LongDash => "long-dash",
+        }
+    }
+
+    /// The inverse of [`Self::id`].
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|s| s.id() == id)
+    }
+
+    /// The name shown to the user.
+    pub fn label(self) -> &'static str {
+        match self {
+            LineStyle::Solid => "Solid",
+            LineStyle::Dashed => "Dashed",
+            LineStyle::Dotted => "Dotted",
+            LineStyle::DashDot => "Dash Dot",
+            LineStyle::DashDotDot => "Dash Dot Dot",
+            LineStyle::LongDash => "Long Dash",
+        }
+    }
+
+    /// The Cairo dash array for a line `width` wide drawn with round caps,
+    /// or an empty one for a solid line. Lengths are multiples of the width,
+    /// so the pattern keeps its look at any width (and when the image is
+    /// scaled). A round cap adds half the width to each end of a dash, so
+    /// "on" lengths are shortened and gaps lengthened by one width to make
+    /// what shows match the intended proportions; a dot is a very short
+    /// dash, which the cap rounds into a circle. (Cairo's stroker drops
+    /// zero-length dashes that aren't first in the pattern, so a dot can't be
+    /// exactly zero long.)
+    pub fn dashes(self, width: f64) -> Vec<f64> {
+        // Very thin lines would give dots too close to see as dots.
+        let w = width.max(1.0);
+        // Visible lengths in widths: dash 3, long dash 6, gap 2, dot 1.
+        let (dash, long, dot, gap) = (2.0 * w, 5.0 * w, 0.05 * w, 3.0 * w);
+        match self {
+            LineStyle::Solid => Vec::new(),
+            LineStyle::Dashed => vec![dash, gap],
+            LineStyle::Dotted => vec![dot, 2.0 * w - dot],
+            LineStyle::DashDot => vec![dash, gap, dot, gap],
+            LineStyle::DashDotDot => vec![dash, gap, dot, gap, dot, gap],
+            LineStyle::LongDash => vec![long, gap],
+        }
+    }
+}
+
 /// How a mark looks. New marks copy the tool bar's current style.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Style {
@@ -103,9 +182,11 @@ pub struct Style {
     pub font_size: f64,
     /// Pango font description without a size, e.g. "Sans" or "Serif Bold Italic".
     pub font: String,
+    /// The dash pattern of lines and borders.
+    pub line: LineStyle,
 }
 
-/// GNOME red, 4 px lines, 28 px Sans, border on and no fill.
+/// GNOME red, 4 px solid lines, 28 px Sans, border on and no fill.
 impl Default for Style {
     fn default() -> Self {
         Self {
@@ -115,6 +196,7 @@ impl Default for Style {
             width: 4.0,
             font_size: 28.0,
             font: DEFAULT_FONT.to_string(),
+            line: LineStyle::Solid,
         }
     }
 }

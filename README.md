@@ -269,7 +269,7 @@ single-letter shortcuts work while the canvas has focus.
 
 - Every mark stays editable. With Select you can click a mark to move it, drag
   its handles to resize it, or press Delete to remove it. Changing the colour,
-  fill, width, text font or text size applies to the selected mark.
+  fill, width, line style, text font or text size applies to the selected mark.
 - Edit a text mark by double-clicking it, by clicking it a second time with
   the Text tool, or by selecting it and pressing Enter or F2. In the editor,
   Enter finishes, Shift+Enter starts a new line, and Esc puts back the old
@@ -296,6 +296,12 @@ single-letter shortcuts work while the canvas has focus.
   least one of border and fill, so turning one off turns the other on. A
   speech bubble with fill off is see-through. The highlighter's opacity
   scales with the colour's.
+- Line style: the drop-down after Width picks Solid, Dashed, Dotted, Dash
+  Dot, Dash Dot Dot or Long Dash for drawing, lines, arrows and the borders
+  of rectangles, ovals and speech bubbles. Dashes and dots scale with the
+  line width, and an arrow's head stays solid. Highlighter strokes, the
+  loupe's rim and text are always solid. Dashes are kept in PNG, JPEG and
+  PDF output (as real dashed vector lines in a PDF).
 - Rotate a mark by holding Alt and dragging it (or dragging anywhere while it
   is selected). Hold Shift as well to snap to 15° steps. Every mark except the
   loupe can be rotated. If GNOME is set to move windows with Alt+drag (it uses
@@ -414,7 +420,7 @@ clipboard for you to paste in.
 ## Remembered settings
 
 Pygoscribe remembers, between uses: the border and fill colours and their
-opacity, whether border and fill are on, the line width, the text font and size, the last folder you opened an image from,
+opacity, whether border and fill are on, the line width and line style, the text font and size, the last folder you opened an image from,
 the last folder you saved to, and the last save format. Changing a control
 with a mark selected restyles that mark and also becomes the new default;
 just selecting a mark doesn't change the defaults.

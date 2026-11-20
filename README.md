@@ -350,8 +350,18 @@ PDFs. The whole document opens, with page 1 on the canvas.
 - **Marking up.** Each page keeps its own marks, crop and undo history, so
   Ctrl+Z only undoes changes on the page you're looking at. Pages you've
   marked up get a dot under their thumbnail, which updates to show the marks.
+- **Reordering pages.** Drag a thumbnail up or down the sidebar and drop it
+  where a line shows it will go; the list scrolls when you drag near its top
+  or bottom. The page's marks and undo history move with it, and the pages
+  are renumbered. Moving pages can't be undone with Ctrl+Z; drag the page
+  back instead.
+- **Deleting pages.** Right-click a thumbnail and choose **Delete Page**, or
+  select it and press **Delete**. Click **Undo** on the message that appears
+  to put the page back with its marks. If you delete the page you're on, the
+  next one opens. A document always keeps at least one page.
 - **Saving.** **Save as PDF…** writes every page, with your marks, as a new
-  PDF (suggested name "name-marked.pdf"). The pages are copied as vectors, so
+  PDF in their current order, leaving out deleted ones (suggested name "name-marked.pdf"). The pages
+  are copied as vectors, so
   their text stays selectable and the file stays small; a cropped page takes
   the crop's size. Links, form fields and bookmarks of the original are not
   kept. PNG, JPEG, Copy and Send To use the current page

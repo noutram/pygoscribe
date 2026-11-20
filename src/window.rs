@@ -624,6 +624,14 @@ impl MarkupWindow {
                 w.canvas.widget().grab_focus();
             });
         }
+        {
+            let w = this.clone();
+            this.sidebar.connect_page_moved(move |from, to| w.move_page(from, to));
+        }
+        {
+            let w = this.clone();
+            this.sidebar.connect_delete_requested(move |i| w.delete_page(i));
+        }
 
         for (tool, button) in &tool_buttons {
             let canvas = this.canvas.clone();
@@ -1018,9 +1026,7 @@ impl MarkupWindow {
             let current = self.canvas.document();
             let pages = self.pages.borrow();
             let pages = pages.as_ref().expect("checked above");
-            let crate::pages::Source::Pdf(pdf) = &pages.source else { unreachable!() };
-            pdf.save_marked(&pages.all_docs(&current), &path)
-                .map_err(|e| glib::Error::new(gio::IOErrorEnum::Failed, &e))
+            pages.save_pdf(&current, &path).map_err(|e| glib::Error::new(gio::IOErrorEnum::Failed, &e))
         } else {
             let Some(tex) = self.result() else { return };
             let ppp = self.pages.borrow().as_ref().map(|p| p.points_per_pixel(p.current())).unwrap_or(1.0);
@@ -1203,13 +1209,10 @@ impl MarkupWindow {
                 self.canvas.commit();
                 let current = self.canvas.document();
                 let pages = self.pages.borrow();
-                match pages.as_ref().map(|p| &p.source) {
-                    Some(crate::pages::Source::Pdf(pdf)) => {
-                        let docs = pages.as_ref().expect("matched").all_docs(&current);
-                        original.replace(|path| {
-                            pdf.save_marked(&docs, path).map_err(|e| glib::Error::new(gio::IOErrorEnum::Failed, &e))
-                        })
-                    }
+                match pages.as_ref() {
+                    Some(p) if p.is_pdf() => original.replace(|path| {
+                        p.save_pdf(&current, path).map_err(|e| glib::Error::new(gio::IOErrorEnum::Failed, &e))
+                    }),
                     _ => return,
                 }
             }
@@ -1343,6 +1346,84 @@ impl MarkupWindow {
         }
         self.sidebar.refresh(left);
         self.sidebar.select(to);
+        self.update_title();
+        self.draw_thumbnails();
+    }
+
+    /// Moves the page at position `from` to position `to` (dragged in the
+    /// sidebar). Its marks and undo history go with it; the page on the
+    /// canvas stays there, and Save as PDF writes the new order.
+    fn move_page(&self, from: usize, to: usize) {
+        let current = {
+            let mut pages = self.pages.borrow_mut();
+            let Some(p) = pages.as_mut() else { return };
+            if !p.move_page(from, to) {
+                return;
+            }
+            p.current()
+        };
+        self.sidebar.move_row(from, to);
+        self.sidebar.select(current);
+        self.update_title();
+        self.toast(&format!("Moved page {} to {}", from + 1, to + 1));
+    }
+
+    /// Deletes the page at position `index` (from the sidebar), with an Undo
+    /// button on the toast that confirms it. Deleting the page on the canvas
+    /// shows the next page (or the previous, for the last) first. Save as PDF
+    /// leaves deleted pages out.
+    fn delete_page(&self, index: usize) {
+        let (len, current) = match self.pages.borrow().as_ref() {
+            Some(p) if p.is_pdf() => (p.len(), p.current()),
+            _ => return,
+        };
+        if index >= len {
+            return;
+        }
+        if len < 2 {
+            self.toast("A document needs at least one page");
+            return;
+        }
+        if index == current {
+            let to = if index + 1 < len { index + 1 } else { index - 1 };
+            self.go_to_page(to);
+            if self.pages.borrow().as_ref().map(Pages::current) != Some(to) {
+                return; // The page couldn't be shown; go_to_page said why.
+            }
+        }
+        let (id, page, state, current) = {
+            let mut pages = self.pages.borrow_mut();
+            let Some(p) = pages.as_mut() else { return };
+            let Some((page, state)) = p.delete_page(index) else { return };
+            (p.id(), page, state, p.current())
+        };
+        self.sidebar.remove_row(index);
+        self.sidebar.select(current);
+        self.update_title();
+
+        let toast = adw::Toast::new(&format!("Deleted page {}", index + 1));
+        toast.set_button_label(Some("_Undo"));
+        // The toast's handler is Fn; the page can only be put back once.
+        let deleted = RefCell::new(Some((page, state)));
+        let w = self.clone();
+        toast.connect_button_clicked(move |_| {
+            if let Some((page, state)) = deleted.borrow_mut().take() {
+                w.restore_page(id, index, page, state);
+            }
+        });
+        self.toasts.add_toast(toast);
+    }
+
+    /// Undo for [`Self::delete_page`]: puts the page back where it was, with
+    /// its marks and history, unless another document has been opened since.
+    fn restore_page(&self, id: u64, index: usize, page: usize, state: PageState) {
+        {
+            let mut pages = self.pages.borrow_mut();
+            let Some(p) = pages.as_mut().filter(|p| p.id() == id) else { return };
+            let index = p.restore_page(index, page, state);
+            self.sidebar.insert_row(p, index);
+            self.sidebar.select(p.current());
+        }
         self.update_title();
         self.draw_thumbnails();
     }

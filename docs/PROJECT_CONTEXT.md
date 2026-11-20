@@ -61,7 +61,7 @@ All four planned steps are done.
 | `src/render.rs` | Cairo drawing, shared by the on-screen canvas and full-resolution export. |
 | `src/pdf.rs` | PDFs via poppler: detect, page sizes, render a page, draw it as vectors, save every page with marks (`save_marked`). |
 | `src/pages.rs` | What is open: one picture or every PDF page; each page's marks and undo history; thumbnails. |
-| `src/sidebar.rs` | Page sidebar: `AdwOverlaySplitView` with a `GtkListBox` of thumbnails, drawn in idle time. |
+| `src/sidebar.rs` | Page sidebar: `AdwOverlaySplitView` with a `GtkListBox` of thumbnails, drawn in idle time; drag a thumbnail to reorder pages, right-click to delete one. |
 | `src/output.rs` | Export: clipboard, save PNG/JPEG/PDF, Open With (FileLauncher / OpenURI portal), Email. |
 | `src/settings.rs` | Remembered settings: style, open/save folders, save format, in a GLib key file. |
 | `src/autostart.rs` | Start at login: `~/.config/autostart/<app id>.desktop` natively, Background portal in Flatpak. |
@@ -266,6 +266,29 @@ poppler-rs 0.26, cairo-rs 0.22 (feature `pdf`), edition 2024. Flatpak uses GNOME
   (poppler/cairo can't copy PDF structure; keeping them would need
   something like `lopdf`). PNG/JPEG/Copy/Send use the current page; names
   default to `name-marked.pdf` / `name-page3.png`.
+- **Reordering pages** (unreleased, branch `feature/reorder-pages`, Nick's
+  request 20 Nov 2026). Thumbnails are dragged in the sidebar (a
+  `GtkDragSource` per row, one `GtkDropTarget` on the list). A 3 px accent
+  line above or below the row under the pointer shows where the page lands,
+  and the list auto-scrolls within 48 px of its edges. `Pages` indexes
+  everything by *position* and keeps `order` (position → source page), so
+  `Pages::move_page` moves a page's state with it and every poppler call
+  goes through `order`; `Pdf::save_marked` takes that order and refuses one
+  that skips or repeats a page. The sidebar moves the existing row (its
+  thumbnail is kept) and renumbers, and queued thumbnails are remapped
+  (`pages::moved_index`). Drags are only accepted from the same sidebar, so
+  a page can't be dropped into another window. Moving isn't on the undo
+  stack, since undo is per page; drag it back instead.
+- **Deleting pages** (unreleased, same branch, Nick's request 20 Nov
+  2026). Delete Page in a thumbnail's right-click menu (a
+  `sidebar.delete-page(u)` action on the list) or the Delete key on the
+  selected row. Deleting the current page first goes to the next page (the
+  previous one for the last). `Pages::delete_page` drops the position from
+  `states` and `order`, so `save_marked` simply gets a shorter order (it
+  now accepts any non-empty order without repeats). The toast has an Undo
+  button that calls `Pages::restore_page` with the saved state, guarded by
+  `Pages::id` so it does nothing once another document is open. The last
+  page can't be deleted. Pictures have no menu.
 - **Zoom** (0.1.10). The canvas keeps a view transform
   (`screen = image * scale + offset`) used for drawing and all hit-testing,
   so marks stay in image pixels and export never sees the zoom. The

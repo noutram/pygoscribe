@@ -21,6 +21,15 @@
 //! page swaps the two ([`Pages::switch`]): the canvas hands over the state it
 //! was holding and receives the new page's. This keeps undo strictly per
 //! page, and means a page's state is never in two places at once.
+//!
+//! # Page order
+//!
+//! Pages can be dragged into a new order in the sidebar. Everything here is
+//! indexed by *position* (where the page is now, from 0); `order` maps each
+//! position to the page of the source it shows, so poppler is always asked
+//! for the right page and Save as PDF writes the pages in their new order.
+//! A page's marks and history travel with it, because they are stored by
+//! position and moved along with `order` ([`Pages::move_page`]).
 
 use crate::document::{Document, History};
 use crate::pdf::Pdf;
@@ -57,20 +66,33 @@ pub struct Pages {
     pub name: Option<String>,
     /// The file it was opened from, if Save can write back to it.
     pub original: Option<crate::output::Original>,
-    /// One per page. The current page's entry is None: its state is on the
-    /// canvas.
+    /// One per page, by position. The current page's entry is None: its
+    /// state is on the canvas.
     states: Vec<Option<PageState>>,
-    /// The index (from 0) of the page on the canvas.
+    /// For each position, the source page (from 0) shown there.
+    order: Vec<usize>,
+    /// The position (from 0) of the page on the canvas.
     current: usize,
-    /// Recently rendered PDF pages as (index, image), most recent first, at
-    /// most [`CACHED_PAGES`] long.
+    /// Unique to this `Pages` (see [`Pages::id`]).
+    id: u64,
+    /// Recently rendered PDF pages as (source page, image), most recent
+    /// first, at most [`CACHED_PAGES`] long.
     cache: Vec<(usize, ImageSurface)>,
 }
 
 impl Pages {
     /// A single picture, which is its own one and only page.
     pub fn picture(image: ImageSurface, name: Option<String>) -> Self {
-        Self { source: Source::Picture(image), name, original: None, states: vec![None], current: 0, cache: Vec::new() }
+        Self {
+            source: Source::Picture(image),
+            name,
+            original: None,
+            states: vec![None],
+            order: vec![0],
+            current: 0,
+            id: next_id(),
+            cache: Vec::new(),
+        }
     }
 
     /// Every page of `pdf`, with page 1 current. `pdf` must have pages.
@@ -79,7 +101,7 @@ impl Pages {
         let mut states: Vec<Option<PageState>> = (0..n).map(|_| Some(PageState::default())).collect();
         // Page 1 starts on the canvas.
         states[0] = None;
-        Self { source: Source::Pdf(pdf), name, original: None, states, current: 0, cache: Vec::new() }
+        Self { source: Source::Pdf(pdf), name, original: None, states, order: (0..n).collect(), current: 0, id: next_id(), cache: Vec::new() }
     }
 
     /// The number of pages (1 for a picture).
@@ -90,6 +112,69 @@ impl Pages {
     /// The index (from 0) of the page on the canvas.
     pub fn current(&self) -> usize {
         self.current
+    }
+
+    /// For each position, the source page (from 0) shown there.
+    #[cfg(test)]
+    pub fn order(&self) -> &[usize] {
+        &self.order
+    }
+
+    /// The source page (from 0) at position `index`, as poppler numbers it.
+    fn source_page(&self, index: usize) -> i32 {
+        self.order.get(index).copied().unwrap_or(index) as i32
+    }
+
+    /// Moves the page at position `from` to position `to`, the pages between
+    /// shifting up or down one. Its marks and undo history go with it, and
+    /// the current page stays current wherever it ends up. Returns false
+    /// (and changes nothing) if either position is out of range or they
+    /// are the same.
+    pub fn move_page(&mut self, from: usize, to: usize) -> bool {
+        let n = self.len();
+        if from >= n || to >= n || from == to {
+            return false;
+        }
+        let state = self.states.remove(from);
+        self.states.insert(to, state);
+        let page = self.order.remove(from);
+        self.order.insert(to, page);
+        self.current = moved_index(self.current, from, to);
+        true
+    }
+
+    /// Deletes the page at position `index`, which must not be the current
+    /// page (go to another page first) or the only one. Returns what
+    /// [`Pages::restore_page`] needs to put it back: its source page and its
+    /// marks and history. None (and nothing changes) if it can't be deleted.
+    pub fn delete_page(&mut self, index: usize) -> Option<(usize, PageState)> {
+        if index >= self.len() || index == self.current || self.len() < 2 {
+            return None;
+        }
+        let state = self.states.remove(index).unwrap_or_default();
+        let page = self.order.remove(index);
+        if self.current > index {
+            self.current -= 1;
+        }
+        Some((page, state))
+    }
+
+    /// Puts a deleted page back at position `index` (or the end, if there
+    /// are fewer pages now). Returns the position it went to.
+    pub fn restore_page(&mut self, index: usize, page: usize, state: PageState) -> usize {
+        let index = index.min(self.len());
+        self.states.insert(index, Some(state));
+        self.order.insert(index, page);
+        if self.current >= index {
+            self.current += 1;
+        }
+        index
+    }
+
+    /// A number identifying this set of pages, so a stale Undo for a
+    /// document that has since been replaced can be told apart.
+    pub fn id(&self) -> u64 {
+        self.id
     }
 
     /// Whether the pages come from a PDF.
@@ -107,13 +192,14 @@ impl Pages {
         match &self.source {
             Source::Picture(image) => Ok(image.clone()),
             Source::Pdf(pdf) => {
-                if let Some((_, s)) = self.cache.iter().find(|(i, _)| *i == index) {
+                let page = self.source_page(index);
+                if let Some((_, s)) = self.cache.iter().find(|(i, _)| *i as i32 == page) {
                     return Ok(s.clone());
                 }
                 // A small most-recently-used cache: newest at the front.
-                let (tex, _) = pdf.render(index as i32)?;
+                let (tex, _) = pdf.render(page)?;
                 let surface = crate::render::surface_from_texture(&tex).map_err(|e| e.to_string())?;
-                self.cache.insert(0, (index, surface.clone()));
+                self.cache.insert(0, (page as usize, surface.clone()));
                 self.cache.truncate(CACHED_PAGES);
                 Ok(surface)
             }
@@ -126,7 +212,7 @@ impl Pages {
         match &self.source {
             Source::Picture(image) => (f64::from(image.width()), f64::from(image.height())),
             Source::Pdf(pdf) => pdf
-                .page_size(index as i32)
+                .page_size(self.source_page(index))
                 .map(|s| (f64::from(s.width), f64::from(s.height)))
                 // A4 proportions if Poppler can't tell us.
                 .unwrap_or((210.0, 297.0)),
@@ -137,7 +223,7 @@ impl Pages {
     pub fn points_per_pixel(&self, index: usize) -> f64 {
         match &self.source {
             Source::Picture(_) => 1.0,
-            Source::Pdf(pdf) => pdf.page_size(index as i32).map(|s| s.points_per_pixel()).unwrap_or(1.0),
+            Source::Pdf(pdf) => pdf.page_size(self.source_page(index)).map(|s| s.points_per_pixel()).unwrap_or(1.0),
         }
     }
 
@@ -146,7 +232,7 @@ impl Pages {
     pub fn painter(&self, index: usize) -> Option<crate::render::Painter> {
         match &self.source {
             Source::Picture(_) => None,
-            Source::Pdf(pdf) => pdf.painter(index as i32).ok().map(|p| Rc::new(p) as crate::render::Painter),
+            Source::Pdf(pdf) => pdf.painter(self.source_page(index)).ok().map(|p| Rc::new(p) as crate::render::Painter),
         }
     }
 
@@ -164,7 +250,15 @@ impl Pages {
         Some(arriving)
     }
 
-    /// Every page's marks, using `current` for the current page.
+    /// Saves every page, in its current order and with its marks, as a
+    /// vector PDF. `current` is the current page's marks (from the canvas).
+    /// Only for pages from a PDF.
+    pub fn save_pdf(&self, current: &Document, path: &std::path::Path) -> Result<(), String> {
+        let Source::Pdf(pdf) = &self.source else { return Err("This isn't a PDF".into()) };
+        pdf.save_marked(&self.order, &self.all_docs(current), path)
+    }
+
+    /// Every page's marks, by position, using `current` for the current page.
     pub fn all_docs(&self, current: &Document) -> Vec<Document> {
         self.states
             .iter()
@@ -187,12 +281,34 @@ impl Pages {
             Source::Pdf(pdf) => {
                 // Draw the PDF page as vectors straight at thumbnail size,
                 // rather than shrinking the 144 dpi render.
-                let ps = pdf.page_size(index as i32)?;
-                let paint = pdf.painter(index as i32)?;
+                let page = self.source_page(index);
+                let ps = pdf.page_size(page)?;
+                let paint = pdf.painter(page)?;
                 let size = (f64::from(ps.width), f64::from(ps.height));
                 crate::render::render_thumbnail(&paint, size, doc, width / size.0.max(1.0)).map_err(err)
             }
         }
+    }
+}
+
+/// A new [`Pages::id`].
+fn next_id() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Where the item at position `i` ends up when the item at `from` moves to
+/// `to` and the ones between close the gap.
+pub fn moved_index(i: usize, from: usize, to: usize) -> usize {
+    if i == from {
+        to
+    } else if from < i && i <= to {
+        i - 1
+    } else if to <= i && i < from {
+        i + 1
+    } else {
+        i
     }
 }
 
@@ -253,5 +369,86 @@ mod tests {
         // Switching to the current page or past the end does nothing.
         assert!(pages.switch(0, PageState::default()).is_none());
         assert!(pages.switch(9, PageState::default()).is_none());
+    }
+
+    /// Moving a page takes its marks with it, shifts the others, keeps the
+    /// current page current and maps positions to the right source pages.
+    #[test]
+    fn moving_pages_keeps_marks_and_order() {
+        let image = ImageSurface::create(cairo::Format::ARgb32, 10, 10).unwrap();
+        let mut pages = Pages::picture(image, None);
+        // Four pages; page 1 (position 0) is on the canvas.
+        pages.states = (0..4).map(|_| Some(PageState::default())).collect();
+        pages.states[0] = None;
+        pages.order = (0..4).collect();
+        for i in 1..4 {
+            pages.states[i].as_mut().unwrap().doc.shapes.push(mark(i as f64));
+        }
+
+        // Drag page 4 to the front: order 3 0 1 2, current page now second.
+        assert!(pages.move_page(3, 0));
+        assert_eq!(pages.order(), &[3, 0, 1, 2]);
+        assert_eq!(pages.current(), 1);
+        assert_eq!(pages.doc(0).unwrap().shapes[0].a, (3.0, 3.0), "marks went with the page");
+        assert!(pages.doc(1).is_none(), "current page's state is still on the canvas");
+
+        // Drag the current page to the end: order 3 1 2 0.
+        assert!(pages.move_page(1, 3));
+        assert_eq!(pages.order(), &[3, 1, 2, 0]);
+        assert_eq!(pages.current(), 3);
+        assert_eq!(pages.source_page(0), 3);
+
+        // Collecting every page follows the new order.
+        let canvas = Document { shapes: vec![mark(9.0)], ..Document::default() };
+        let all = pages.all_docs(&canvas);
+        let firsts: Vec<f64> = all.iter().map(|d| d.shapes[0].a.0).collect();
+        assert_eq!(firsts, vec![3.0, 1.0, 2.0, 9.0]);
+
+        // Out of range or no move: nothing changes.
+        assert!(!pages.move_page(0, 0));
+        assert!(!pages.move_page(0, 4));
+        assert_eq!(pages.order(), &[3, 1, 2, 0]);
+    }
+
+    /// Deleting a page drops it from the order and the saved pages; undoing
+    /// puts it back with its marks. The current and only pages can't go.
+    #[test]
+    fn deleting_and_restoring_pages() {
+        let image = ImageSurface::create(cairo::Format::ARgb32, 10, 10).unwrap();
+        let mut pages = Pages::picture(image, None);
+        pages.states = (0..4).map(|_| Some(PageState::default())).collect();
+        pages.order = (0..4).collect();
+        pages.states[2] = None;
+        pages.current = 2;
+        pages.states[1].as_mut().unwrap().doc.shapes.push(mark(1.0));
+
+        assert!(pages.delete_page(2).is_none(), "the current page stays");
+        let (page, state) = pages.delete_page(1).unwrap();
+        assert_eq!((page, state.doc.shapes.len()), (1, 1));
+        assert_eq!(pages.order(), &[0, 2, 3]);
+        assert_eq!(pages.current(), 1, "current page moved up one");
+        assert_eq!(pages.all_docs(&Document::default()).len(), 3);
+
+        assert_eq!(pages.restore_page(1, page, state), 1);
+        assert_eq!(pages.order(), &[0, 1, 2, 3]);
+        assert_eq!(pages.current(), 2);
+        assert_eq!(pages.doc(1).unwrap().shapes.len(), 1, "marks came back");
+
+        // Down to one page: that one can't be deleted.
+        pages.delete_page(0).unwrap();
+        pages.delete_page(2).unwrap();
+        pages.delete_page(0).unwrap();
+        assert_eq!(pages.len(), 1);
+        assert!(pages.delete_page(0).is_none());
+    }
+
+    #[test]
+    fn moved_index_shifts_the_pages_between() {
+        // Moving 1 → 3 in [a b c d e]: b lands at 3, c and d move up.
+        let after: Vec<usize> = (0..5).map(|i| moved_index(i, 1, 3)).collect();
+        assert_eq!(after, vec![0, 3, 1, 2, 4]);
+        // Moving 3 → 0: d to the front, a b c move down.
+        let after: Vec<usize> = (0..5).map(|i| moved_index(i, 3, 0)).collect();
+        assert_eq!(after, vec![1, 2, 3, 0, 4]);
     }
 }

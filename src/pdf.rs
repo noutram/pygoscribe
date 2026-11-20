@@ -159,21 +159,31 @@ impl Pdf {
         Ok((texture, size.points_per_pixel()))
     }
 
-    /// Saves every page with its marks (one `Document` per page, in image
-    /// pixels) as a new PDF. The pages are drawn by poppler straight into the
-    /// PDF, so their text and drawings stay vector; the marks are vector too.
-    /// A cropped page gets the size of its crop.
-    pub fn save_marked(&self, docs: &[Document], path: &std::path::Path) -> Result<(), String> {
-        if docs.len() != self.n_pages() as usize {
-            return Err("The page count changed".into());
+    /// Saves pages with their marks as a new PDF. `order` lists the source
+    /// pages (from 0) to write, in order (deleted pages are left out), and
+    /// `docs` holds each one's marks (in image pixels) in that same order. The pages are
+    /// drawn by poppler straight into the PDF, so their text and drawings
+    /// stay vector; the marks are vector too. A cropped page gets the size of
+    /// its crop.
+    pub fn save_marked(&self, order: &[usize], docs: &[Document], path: &std::path::Path) -> Result<(), String> {
+        let n = self.n_pages() as usize;
+        if docs.len() != order.len() || order.is_empty() {
+            return Err("There are no pages to save".into());
+        }
+        // Each page at most once, and only pages that exist.
+        let mut seen = vec![false; n];
+        for &p in order {
+            if p >= n || std::mem::replace(&mut seen[p], true) {
+                return Err("The page order is not valid".into());
+            }
         }
         let err = |e: cairo::Error| e.to_string();
         // The initial size doesn't matter: each page sets its own below
         // (set_size applies to the page about to be drawn).
         let surface = cairo::PdfSurface::new(1.0, 1.0, path).map_err(err)?;
         let cr = cairo::Context::new(&surface).map_err(err)?;
-        for (i, doc) in docs.iter().enumerate() {
-            let index = i as i32;
+        for (&page, doc) in order.iter().zip(docs) {
+            let index = page as i32;
             let size = self.page_size(index)?;
             let paint = self.painter(index)?;
             let r = doc.crop.unwrap_or(crate::document::Rect {
@@ -360,7 +370,7 @@ mod tests {
             Document { shapes: vec![], crop: Some(Rect { x: 100.0, y: 100.0, w: 200.0, h: 100.0 }), image: None },
         ];
         let out = dir.join("out.pdf");
-        pdf.save_marked(&docs, &out).unwrap();
+        pdf.save_marked(&[0, 1, 2], &docs, &out).unwrap();
 
         let back = Pdf::open(&gio::File::for_path(&out)).unwrap();
         assert_eq!(back.n_pages(), 3);
@@ -380,8 +390,37 @@ mod tests {
         assert!(edge[2] > 200 && edge[0] < 60, "blue mark drawn: {edge:?}");
         assert_eq!(px(200, 200), [255, 255, 255]);
 
-        // A wrong number of pages is refused instead of writing a bad file.
-        assert!(pdf.save_marked(&docs[..2], &dir.join("bad.pdf")).is_err());
+        // Marks that don't match the pages are refused instead of writing a
+        // bad file, as are no pages, a repeated page and a missing page.
+        assert!(pdf.save_marked(&[0, 1], &docs, &dir.join("bad.pdf")).is_err());
+        assert!(pdf.save_marked(&[], &[], &dir.join("bad.pdf")).is_err());
+        assert!(pdf.save_marked(&[0, 1, 1], &docs, &dir.join("bad.pdf")).is_err());
+        assert!(pdf.save_marked(&[0, 1, 3], &docs, &dir.join("bad.pdf")).is_err());
+
+        // With page 2 deleted, only pages 1 and 3 are written.
+        let out3 = dir.join("deleted.pdf");
+        pdf.save_marked(&[0, 2], &[docs[0].clone(), docs[2].clone()], &out3).unwrap();
+        let back = Pdf::open(&gio::File::for_path(&out3)).unwrap();
+        assert_eq!(back.n_pages(), 2);
+        assert_eq!(back.0.page(1).unwrap().size(), (100.0, 50.0));
+
+        // Reordered: page 3, then 1, then 2, each with its own marks.
+        let reordered = vec![docs[2].clone(), docs[0].clone(), docs[1].clone()];
+        let out2 = dir.join("reordered.pdf");
+        pdf.save_marked(&[2, 0, 1], &reordered, &out2).unwrap();
+        let back = Pdf::open(&gio::File::for_path(&out2)).unwrap();
+        let size = |i| back.0.page(i).unwrap().size();
+        assert_eq!(size(0), (100.0, 50.0), "cropped page 3 now first");
+        assert_eq!(size(1), (300.0, 200.0));
+        assert_eq!(size(2), (200.0, 300.0));
+        let text = back.0.page(1).unwrap().text().map(|t| t.to_string()).unwrap_or_default();
+        assert!(text.contains("Hello page one"), "page 1's text moved with it: {text:?}");
+        let (tex, _) = back.render(2).unwrap();
+        let mut dl = gdk::TextureDownloader::new(&tex);
+        dl.set_format(gdk::MemoryFormat::R8g8b8a8);
+        let (bytes, stride) = dl.download_bytes();
+        let edge = bytes[200 * stride + 100 * 4..][..3].to_vec();
+        assert!(edge[2] > 200 && edge[0] < 60, "page 2's mark moved with it: {edge:?}");
         let _ = std::fs::remove_dir_all(dir);
     }
 }

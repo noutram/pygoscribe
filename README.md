@@ -207,6 +207,11 @@ of the app, and `src/main.rs` has a map of the modules. `cargo doc
   off.
 - `pygoscribe --version`: prints the version, copyright, license and the
   no-warranty notice.
+- **Drag and drop:** drop images or PDFs from the file manager (or an image
+  from a web browser) anywhere on a window to open them. An empty window
+  opens the first one itself; anything else gets a window of its own, so a
+  picture you're marking up is never replaced. Other kinds of file are
+  skipped with a message.
 
 ## Start at login
 
@@ -338,8 +343,8 @@ the percentage between them opens a menu with Actual Size and Zoom to Fit.
 
 ## PDFs
 
-Open Image…, `pygoscribe FILE.pdf` and Open With from the file manager accept
-PDFs. The whole document opens, with page 1 on the canvas.
+Open Image…, `pygoscribe FILE.pdf`, Open With from the file manager and
+dragging a file onto a window accept PDFs. The whole document opens, with page 1 on the canvas.
 
 - **Page sidebar.** Thumbnails of every page scroll down the left of the
   window. Show or hide it with the button at the left of the header bar or

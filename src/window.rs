@@ -831,8 +831,58 @@ impl MarkupWindow {
             this,
             move |_| choose_and_open(&this.app(), Some(&this))
         ));
+        this.add_file_drop_target(&view);
 
         this
+    }
+
+    /// Opens files (from the file manager) or image data (from a browser)
+    /// dropped anywhere on the window. The sidebar's own page drags carry a
+    /// page number, not these types, so they never reach this target.
+    fn add_file_drop_target(&self, widget: &impl IsA<gtk::Widget>) {
+        let target = gtk::DropTarget::new(glib::Type::INVALID, gdk::DragAction::COPY);
+        target.set_types(&[gdk::FileList::static_type(), gdk::Texture::static_type()]);
+        let this = self.clone();
+        target.connect_drop(move |_, value, _, _| {
+            if let Ok(list) = value.get::<gdk::FileList>() {
+                this.open_dropped_files(&list.files());
+                true
+            } else if let Ok(texture) = value.get::<gdk::Texture>() {
+                this.target_for_drop().set_texture(&texture, None);
+                true
+            } else {
+                false
+            }
+        });
+        widget.add_controller(target);
+    }
+
+    /// Opens dropped files: images and PDFs only, the first one in this
+    /// window if it's empty, and each other one in a window of its own (as
+    /// Open With does), so nothing already marked up is replaced.
+    fn open_dropped_files(&self, files: &[gio::File]) {
+        let (wanted, skipped): (Vec<_>, Vec<_>) = files.iter().partition(|f| is_openable(f));
+        for file in wanted {
+            self.target_for_drop().load_file(file);
+        }
+        match skipped.as_slice() {
+            [] => {}
+            [one] => self.toast(&format!(
+                "{} is not an image or a PDF",
+                file_name(one).unwrap_or_else(|| "The file".into())
+            )),
+            many => self.toast(&format!("{} files are not images or PDFs", many.len())),
+        }
+    }
+
+    /// This window while it's empty, otherwise a new one.
+    fn target_for_drop(&self) -> MarkupWindow {
+        if self.pages.borrow().is_none() {
+            return self.clone();
+        }
+        let w = MarkupWindow::new(&self.app());
+        w.present();
+        w
     }
 
     /// The application this window belongs to.
@@ -1602,6 +1652,21 @@ enum PageStep {
     Last,
 }
 
+/// Whether a dropped file looks like something Pygoscribe can open: a PDF or
+/// any image type (guessed from the name, then from the first bytes).
+fn is_openable(file: &gio::File) -> bool {
+    if crate::pdf::is_pdf(file) {
+        return true;
+    }
+    let head = file
+        .read(gio::Cancellable::NONE)
+        .and_then(|s| s.read_bytes(4096, gio::Cancellable::NONE))
+        .map(|b| b.to_vec())
+        .unwrap_or_default();
+    let (kind, _) = gio::content_type_guess(file.basename(), head.as_slice());
+    kind.starts_with("image/")
+}
+
 /// The file's base name, for the title and suggested save names.
 fn file_name(file: &gio::File) -> Option<String> {
     file.basename().map(|n| n.to_string_lossy().to_string())
@@ -1728,4 +1793,30 @@ pub fn choose_and_open(app: &adw::Application, target: Option<&MarkupWindow>) {
         }
         win.load_file(&file);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Writes `bytes` to a fresh temporary file called `name`.
+    fn temp_file(name: &str, bytes: &[u8]) -> gio::File {
+        let dir = std::env::temp_dir().join(format!("pygoscribe-drop-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).unwrap();
+        gio::File::for_path(path)
+    }
+
+    #[test]
+    fn dropped_files_are_opened_only_if_images_or_pdfs() {
+        const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR";
+        assert!(is_openable(&temp_file("shot.png", PNG)));
+        // Content counts when the name says nothing.
+        assert!(is_openable(&temp_file("shot", PNG)));
+        assert!(is_openable(&temp_file("doc", b"%PDF-1.7\n")));
+        assert!(is_openable(&temp_file("doc.PDF", b"")));
+        assert!(!is_openable(&temp_file("notes.txt", b"hello")));
+        assert!(!is_openable(&temp_file("archive.zip", b"PK\x03\x04")));
+    }
 }

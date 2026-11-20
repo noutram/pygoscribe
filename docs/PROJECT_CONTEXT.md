@@ -47,6 +47,7 @@ All four planned steps are done.
 | 0.1.14 | Licensed GPL-3.0-only; About window (main menu, tray); third-party notices; source tarballs on each release | Released 14 Nov (`v0.1.14`, .deb, Flatpak, src and Poppler tarballs) |
 | 0.1.15 | No-warranty disclaimer: README (GPL §15–16), About comments, metainfo, debian/copyright, source notices, `--version` | Released 14 Nov (`v0.1.15`) |
 | 0.1.20 | Reorder PDF pages by dragging thumbnails; delete pages (right-click or Delete, with Undo); Save as PDF follows the new order | Released 20 Nov (`v0.1.20`) |
+| 0.1.21 | Drag images and PDFs (or image data) onto a window to open them | On branch `feature/drop-to-open`, not released |
 
 ## Architecture
 
@@ -229,7 +230,7 @@ poppler-rs 0.26, cairo-rs 0.22 (feature `pdf`), edition 2024. Flatpak uses GNOME
   popover-closing problem.
 - **PDF support** (0.1.7). PDFs open
   wherever images do (Open Image… filter, command line, `.desktop` MimeType
-  `application/pdf`; there is no drag and drop). `poppler-rs` 0.26 (it uses
+  `application/pdf`; drag and drop since 0.1.21). `poppler-rs` 0.26 (it uses
   the same glib/cairo 0.22 stack) renders the page with Cairo at 2 px per
   point (144 dpi), capped at 8192 px on the longest side, on white. A PDF with
   several pages asks for the page in an `AdwAlertDialog` with a spin button;
@@ -288,6 +289,17 @@ poppler-rs 0.26, cairo-rs 0.22 (feature `pdf`), edition 2024. Flatpak uses GNOME
   button that calls `Pages::restore_page` with the saved state, guarded by
   `Pages::id` so it does nothing once another document is open. The last
   page can't be deleted. Pictures have no menu.
+- **Drag and drop to open** (0.1.21, Nick's request 20 Nov 2026). One
+  `GtkDropTarget` on the window's `AdwToolbarView` takes `GdkFileList`
+  (Nautilus, and the document portal under Flatpak) or `GdkTexture` (image
+  data, e.g. from a browser). The sidebar's page drags carry a `u32`, so
+  they never match it, and file drags over the sidebar fall through to it
+  because the list's target refuses anything that isn't its own page drag.
+  There's no unsaved-changes prompt in the app, so a drop never replaces a
+  document: an empty window opens the first item, everything else opens in
+  a new window, like Open With. `is_openable` (PDF check, then
+  `content_type_guess` on name and first 4 KB must be `image/*`) filters the
+  list; skipped files get a toast. Test: `dropped_files_are_opened_only_if_images_or_pdfs`.
 - **Zoom** (0.1.10). The canvas keeps a view transform
   (`screen = image * scale + offset`) used for drawing and all hit-testing,
   so marks stay in image pixels and export never sees the zoom. The

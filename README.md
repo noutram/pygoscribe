@@ -316,8 +316,12 @@ single-letter shortcuts work while the canvas has focus.
   choose an arrowhead at both ends for a double-headed arrow. On a drawing,
   the end follows the direction the stroke was going. Ends are kept in PNG,
   JPEG and PDF output (as vector shapes in a PDF).
+- Hold Shift while drawing a line or arrow, or while dragging one of its
+  ends, to snap its angle to 15° steps, so level and upright lines come out
+  exact. The length still follows the pointer.
 - Rotate a mark by holding Alt and dragging it (or dragging anywhere while it
-  is selected). Hold Shift as well to snap to 15° steps. Every mark except the
+  is selected). Hold Shift as well to snap to 15° steps (a line or arrow
+  snaps to the same directions as when drawing it). Every mark except the
   loupe can be rotated. If GNOME is set to move windows with Alt+drag (it uses
   Super by default), use Super+drag instead.
 - Crop: drag the area to keep, then press Enter or double-click. Esc cancels.

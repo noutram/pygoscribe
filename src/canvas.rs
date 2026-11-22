@@ -48,7 +48,7 @@
 //! then renders just the visible region again with Poppler at the screen's
 //! resolution ([`Hires`]), drawing it over the blurry base image.
 
-use crate::document::{Document, EndsFor, HAlign, History, Kind, Point, Rect, Rgba, Shape, Style, Tool, VAlign};
+use crate::document::{self, Document, EndsFor, HAlign, History, Kind, Point, Rect, Rgba, Shape, Style, Tool, VAlign};
 use crate::pages::PageState;
 use crate::render;
 use crate::view::{self, MARGIN};
@@ -76,9 +76,6 @@ const HIRES_DELAY: Duration = Duration::from_millis(120);
 const ACCENT: Rgba = Rgba::new(0.208, 0.518, 0.894, 1.0);
 /// Restyles of the same mark less than this far apart share one undo step.
 const RESTYLE_MERGE: Duration = Duration::from_millis(1000);
-/// Shift+Alt+drag snaps rotation to steps of this size (15°).
-const SNAP: f64 = std::f64::consts::PI / 12.0;
-
 /// Whether a drag with these modifiers should rotate. Alt is the documented
 /// key. GNOME moves windows with Super+drag by default, but it can be set to
 /// Alt (org.gnome.desktop.wm.preferences mouse-button-modifier), in which case
@@ -1612,6 +1609,10 @@ impl Canvas {
                         let s = (p.0 - start.0).abs().max((p.1 - start.1).abs());
                         shape.b = (start.0 + s.copysign(p.0 - start.0), start.1 + s.copysign(p.1 - start.1));
                     }
+                    // Shift snaps a line or arrow to 15° steps.
+                    Kind::Line | Kind::Arrow if mods.contains(gdk::ModifierType::SHIFT_MASK) => {
+                        shape.b = document::snap_point(*start, p);
+                    }
                     _ => shape.b = p,
                 }
             }
@@ -1622,6 +1623,17 @@ impl Canvas {
             }
             Drag::Resize { idx, handle, orig, .. } => {
                 let (idx, handle) = (*idx, *handle);
+                // Shift snaps a line's dragged end to 15° steps round the
+                // other end.
+                let p = match handle {
+                    0 if orig.is_segment() && mods.contains(gdk::ModifierType::SHIFT_MASK) => {
+                        document::snap_point(orig.b, p)
+                    }
+                    1 if orig.is_segment() && mods.contains(gdk::ModifierType::SHIFT_MASK) => {
+                        document::snap_point(orig.a, p)
+                    }
+                    _ => p,
+                };
                 doc.shapes[idx].resize_from(orig, handle, p);
                 render::fit_text(&mut doc.shapes[idx]);
             }
@@ -1631,12 +1643,23 @@ impl Canvas {
                 let turn = |q: Point| (q.1 - center.1).atan2(q.0 - center.0);
                 let mut delta = turn(p) - turn(*start);
                 if mods.contains(gdk::ModifierType::SHIFT_MASK) {
-                    // Snap the resulting angle (or, for marks rotated by
-                    // moving their points, the turn itself).
-                    let base = orig.angle;
-                    delta = ((base + delta) / SNAP).round() * SNAP - base;
+                    // Snap the resulting angle: a boxed mark's own, a line's
+                    // direction (so it can land exactly level or upright),
+                    // or, for freehand marks, the turn itself.
+                    let base = if orig.is_segment() {
+                        (orig.b.1 - orig.a.1).atan2(orig.b.0 - orig.a.0)
+                    } else {
+                        orig.angle
+                    };
+                    delta = document::snap_angle(base + delta) - base;
                 }
-                doc.shapes[*idx].rotate_from(orig, delta);
+                let shape = &mut doc.shapes[*idx];
+                shape.rotate_from(orig, delta);
+                if orig.is_segment() && mods.contains(gdk::ModifierType::SHIFT_MASK) {
+                    // Clean off rounding so level and upright lines are exact.
+                    shape.b = document::snap_point(*center, shape.b);
+                    shape.a = (2.0 * center.0 - shape.b.0, 2.0 * center.1 - shape.b.1);
+                }
             }
             Drag::Crop { start } => *pending_crop = Some(Rect::from_points(*start, p)),
         }
@@ -2347,6 +2370,56 @@ mod tests {
         c.end_space();
         assert!(c.pan_by(0.0, ARROW_STEP));
         assert_eq!(c.0.state.borrow().offset.1, start.1 - 30.0 - ARROW_STEP);
+    }
+
+    /// Shift snaps a line to 15° steps while it is drawn, while an end is
+    /// dragged, and while Alt+drag turns it.
+    #[test]
+    #[ignore]
+    fn shift_snaps_line_angles() {
+        gtk::init().unwrap();
+        let image = ImageSurface::create(cairo::Format::ARgb32, 400, 400).unwrap();
+        let c = Canvas::new();
+        c.swap_page(image, PageState::default());
+        c.zoom_to(1.0, None);
+        let screen = |p: Point| {
+            let st = c.0.state.borrow();
+            (p.0 * st.scale + st.offset.0, p.1 * st.scale + st.offset.1)
+        };
+        let shift = gdk::ModifierType::SHIFT_MASK;
+        // Drawing: a nearly level line comes out level.
+        c.set_tool(Tool::Arrow);
+        let (x0, y0) = screen((100.0, 100.0));
+        let (x1, y1) = screen((300.0, 108.0));
+        c.drag_begin(x0, y0, shift);
+        c.drag_update(x1, y1, shift);
+        c.drag_end(x1, y1, shift);
+        let line = c.document().shapes[0].clone();
+        assert_eq!(line.a, (100.0, 100.0));
+        assert_eq!(line.b.1, 100.0);
+        // Without Shift it follows the pointer.
+        c.set_tool(Tool::Line);
+        c.drag_begin(x0, y0 + 100.0, gdk::ModifierType::empty());
+        c.drag_end(x1, y1 + 100.0, gdk::ModifierType::empty());
+        assert_eq!(c.document().shapes[1].b, (300.0, 208.0));
+        // Dragging the end of the selected line: nearly upright snaps upright.
+        c.set_tool(Tool::Select);
+        c.st().selected = Some(1);
+        let (hx, hy) = screen((300.0, 208.0));
+        let (tx, ty) = screen((96.0, 380.0));
+        c.drag_begin(hx, hy, shift);
+        c.drag_end(tx, ty, shift);
+        let s = c.document().shapes[1].clone();
+        assert_eq!(s.b.0, 100.0, "{s:?}");
+        // Shift+Alt+drag turns the first line to exactly upright.
+        c.st().selected = Some(0);
+        let (cx, cy) = screen((300.0, 100.0));
+        let (ux, uy) = screen((205.0, 290.0));
+        let both = shift | gdk::ModifierType::ALT_MASK;
+        c.drag_begin(cx, cy, both);
+        c.drag_end(ux, uy, both);
+        let s = c.document().shapes[0].clone();
+        assert_eq!(s.a.0, s.b.0, "{s:?}");
     }
 
     /// Double-clicking a rectangle or line edits its text with any tool,

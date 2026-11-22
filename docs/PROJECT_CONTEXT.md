@@ -50,7 +50,8 @@ All four planned steps are done.
 | 0.1.21 | Drag images and PDFs (or image data) onto a window to open them | Released 20 Nov (`v0.1.21`) |
 | 0.1.22 | Select several pages in the sidebar (Ctrl/Shift+click, Ctrl+A) and delete them together, with one Undo | Released 20 Nov (`v0.1.22`) |
 | 0.1.23 | Line style (solid, dashed, dotted, dash dot, dash dot dot, long dash) for drawing, lines, arrows and shape borders | Released 20 Nov (`v0.1.23`) |
-| 0.1.24 | Line ends (arrow, open arrow, swept arrow, dot, circle, square, diamond, bar) at either end of drawings, lines and arrows | On branch `feature/line-ends`, not yet released |
+| 0.1.24 | Line ends (arrow, open arrow, swept arrow, dot, circle, square, diamond, bar) at either end of drawings, lines and arrows | Merged to `master`, not yet released |
+| 0.1.24 | Shift snaps lines and arrows to 15° while drawing or dragging an end; Shift+Alt rotation snaps a line's direction | On branch `feature/angle-snap`, not yet released |
 
 ## Architecture
 
@@ -195,8 +196,10 @@ poppler-rs 0.26, cairo-rs 0.22 (feature `pdf`), edition 2024. Flatpak uses GNOME
   browser pane, so it only helps for code-triggered checks.
 - **Rotating marks** (0.1.4). Alt+drag rotates the mark under the pointer,
   or the selected mark if the drag starts elsewhere, with any tool;
-  Shift+Alt snaps to 15°. Rectangles, ovals, bubbles and text keep a
-  `Shape::angle` (radians, about the centre of `bounds()`); hit testing,
+  Shift+Alt snaps to 15° (`document::SNAP_ANGLE`): a boxed mark's own
+  angle, a line's or arrow's direction (cleaned up with `snap_point` so
+  level and upright are exact), or a freehand mark's turn. Rectangles,
+  ovals, bubbles and text keep a `Shape::angle` (radians, about the centre of `bounds()`); hit testing,
   handles and resizing work in the mark's own frame, so the opposite corner
   stays put on screen. Lines, arrows and freehand marks are rotated by moving
   their points (angle stays 0). The loupe doesn't rotate. Rotated text keeps
@@ -204,6 +207,14 @@ poppler-rs 0.26, cairo-rs 0.22 (feature `pdf`), edition 2024. Flatpak uses GNOME
   modifier (`org.gnome.desktop.wm.preferences mouse-button-modifier`) is
   `<Super>` by default, so Alt+drag reaches the app; if someone sets it to
   `<Alt>`, GNOME swallows Alt+drag, so Super (and Meta) also rotate.
+- **Angle snapping for lines** (0.1.24, Nick asked for it on 22 Nov).
+  Holding Shift while drawing a line or arrow, or while dragging one of its
+  ends, snaps its direction to 15° steps round the fixed end and keeps the
+  pointer's distance as the length (`document::snap_point`). Shift was free
+  during drags: it only means Shift+Enter in the text editor, Shift+scroll,
+  Shift+arrow keys and Shift+F10, none of which happen mid-drag, and
+  Shift+letter still picks a tool. Rectangles and ovals are not constrained
+  to squares and circles by Shift (not asked for).
 - **Transparent colours** (0.1.5, Nick chose "both": opacity *and* a
   none option). Border and fill each get a `ColourControl` in `window.rs`:
   the colour button plus an opacity slider and presets (a "NN%" menu button before 0.1.24); it

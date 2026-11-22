@@ -510,6 +510,30 @@ pub fn normalize_angle(a: f64) -> f64 {
     if a > PI { a - TAU } else { a }
 }
 
+/// Holding Shift snaps angles to multiples of this (15°): a line's direction
+/// while it is drawn or an end is dragged, and a rotation.
+pub const SNAP_ANGLE: f64 = std::f64::consts::PI / 12.0;
+
+/// Rounds `a` to the nearest multiple of [`SNAP_ANGLE`].
+pub fn snap_angle(a: f64) -> f64 {
+    (a / SNAP_ANGLE).round() * SNAP_ANGLE
+}
+
+/// `to`, moved round `from` so the line between them points in a multiple of
+/// [`SNAP_ANGLE`], keeping its length. Horizontal and vertical lines come out
+/// exact.
+pub fn snap_point(from: Point, to: Point) -> Point {
+    let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+    let len = dx.hypot(dy);
+    if len == 0.0 {
+        return to;
+    }
+    let (sin, cos) = snap_angle(dy.atan2(dx)).sin_cos();
+    // sin and cos of a right angle aren't exactly 0 in floating point.
+    let exact = |v: f64| if v.abs() < 1e-12 { 0.0 } else { v };
+    (from.0 + len * exact(cos), from.1 + len * exact(sin))
+}
+
 /// The distance from `p` to the nearest point of the segment `a`–`b`.
 fn dist_to_segment(p: Point, a: Point, b: Point) -> f64 {
     let (dx, dy) = (b.0 - a.0, b.1 - a.1);
@@ -926,6 +950,25 @@ mod tests {
         let orig = s.clone();
         s.resize_from(&orig, 2, (70.0, 60.0));
         assert_eq!(s.bounds(), Rect { x: 10.0, y: 10.0, w: 60.0, h: 50.0 });
+    }
+
+    /// Shift snaps a line's end to 15° steps round the other end, keeping
+    /// its length; horizontal and vertical are exact.
+    #[test]
+    fn snap_point_steps() {
+        let q = snap_point((10.0, 10.0), (110.0, 13.0));
+        assert_eq!(q.1, 10.0, "exactly horizontal");
+        assert!((q.0 - (10.0 + 100.0_f64.hypot(3.0))).abs() < 1e-9);
+        let q = snap_point((10.0, 10.0), (12.0, -90.0));
+        assert_eq!(q.0, 10.0, "exactly vertical");
+        assert!((q.1 - (10.0 - 2.0_f64.hypot(100.0))).abs() < 1e-9);
+        assert_eq!(snap_point((5.0, 5.0), (5.0, 5.0)), (5.0, 5.0));
+        let q = snap_point((0.0, 0.0), (100.0, 95.0));
+        assert!(close(q, (100.0_f64.hypot(95.0) / 2f64.sqrt(), 100.0_f64.hypot(95.0) / 2f64.sqrt())), "{q:?}");
+        let q = snap_point((0.0, 0.0), (-100.0, 30.0));
+        let len = 100.0_f64.hypot(30.0);
+        let a = 165f64.to_radians();
+        assert!(close(q, (len * a.cos(), len * a.sin())), "{q:?}");
     }
 
     /// Whether two points are equal up to rounding.

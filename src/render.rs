@@ -29,7 +29,7 @@
 //!   it to blend only with the page (not with what is under the output) draw
 //!   the page into a group first (`push_group` / `pop_group_to_source`).
 
-use crate::document::{rotate_point, Document, HAlign, Kind, Point, Rect, Rgba, Shape, Style, VAlign};
+use crate::document::{rotate_point, Document, HAlign, Kind, LineEnd, Point, Rect, Rgba, Shape, Style, VAlign};
 use gtk::cairo::{self, Context, ImageSurface};
 use gtk::gdk;
 use gtk::pango;
@@ -185,9 +185,10 @@ fn line_label(shape: &Shape) -> Option<LineLabel> {
     };
     let (tw, th) = text_size(&shape.label, &st.font, st.font_size);
     let pad = st.font_size * 0.2;
-    // Keep text off an arrow's head.
-    let head = if matches!(shape.kind, Kind::Arrow) { (st.width * 3.0 + 8.0).min(len * 0.6) } else { 0.0 };
-    let (head_start, head_end) = if flipped { (head, 0.0) } else { (0.0, head) };
+    // Keep text off the line's ends (an arrowhead, a dot…).
+    let size = end_size(st, len);
+    let (at_a, at_b) = (end_reach(st.start, size, st.width), end_reach(st.end, size, st.width));
+    let (head_start, head_end) = if flipped { (at_b, at_a) } else { (at_a, at_b) };
     let x = match shape.halign {
         HAlign::Left => head_start + pad,
         HAlign::Center => (len - tw) / 2.0,
@@ -413,12 +414,7 @@ pub fn draw_shape_on(cr: &Context, background: Background, shape: &Shape) {
     }
     let st = &shape.style;
     match &shape.kind {
-        Kind::Pen(pts) => {
-            polyline(cr, pts);
-            set_color(cr, st.stroke);
-            set_line(cr, st);
-            let _ = cr.stroke();
-        }
+        Kind::Pen(pts) => draw_stroke(cr, st, pts),
         Kind::Highlighter(pts) => {
             polyline(cr, pts);
             // A see-through, multiplied stroke: like a marker pen, it
@@ -429,16 +425,9 @@ pub fn draw_shape_on(cr: &Context, background: Background, shape: &Shape) {
             cr.set_operator(cairo::Operator::Multiply);
             let _ = cr.stroke();
         }
-        Kind::Line => {
-            cr.move_to(shape.a.0, shape.a.1);
-            cr.line_to(shape.b.0, shape.b.1);
-            set_color(cr, st.stroke);
-            set_line(cr, st);
-            let _ = cr.stroke();
-            draw_label(cr, shape);
-        }
-        Kind::Arrow => {
-            draw_arrow(cr, shape);
+        // An arrow is a line whose ends came from the Arrow tool.
+        Kind::Line | Kind::Arrow => {
+            draw_stroke(cr, st, &[shape.a, shape.b]);
             draw_label(cr, shape);
         }
         Kind::Rect => {
@@ -503,35 +492,188 @@ pub fn draw_shape_on(cr: &Context, background: Background, shape: &Shape) {
     let _ = cr.restore();
 }
 
-/// Draws an arrow from `a` to a filled triangular head at `b`. The head
-/// grows with the line width but never takes more than 60 % of the length.
-fn draw_arrow(cr: &Context, shape: &Shape) {
-    let st = &shape.style;
-    let (ax, ay) = shape.a;
-    let (bx, by) = shape.b;
-    let len = ((bx - ax).powi(2) + (by - ay).powi(2)).sqrt();
-    if len < 0.5 {
-        return;
+/// Half the opening angle of a filled arrowhead, in radians (about 26°).
+const ARROW_SPREAD: f64 = 0.45;
+/// Half the opening angle of open and swept arrowheads (about 29°).
+const WIDE_SPREAD: f64 = 0.5;
+
+/// The size of a line's ends: the length of a filled arrowhead, which the
+/// other ends are scaled from. It grows with the width but never takes more
+/// than 60 % of the line (40 % each when both ends are drawn), so short
+/// lines keep some line showing.
+fn end_size(st: &Style, len: f64) -> f64 {
+    let both = st.start != LineEnd::None && st.end != LineEnd::None;
+    (st.width * 3.0 + 8.0).min(len * if both { 0.4 } else { 0.6 })
+}
+
+/// How far an end reaches back along the line from its point (to keep text
+/// clear of it).
+fn end_reach(end: LineEnd, size: f64, width: f64) -> f64 {
+    match end {
+        LineEnd::None => 0.0,
+        LineEnd::Arrow | LineEnd::Stealth => size,
+        LineEnd::OpenArrow => size * WIDE_SPREAD.cos() + width / 2.0,
+        LineEnd::Dot => size * 0.35,
+        LineEnd::Circle => size * 0.35 + width / 2.0,
+        LineEnd::Square => size * 0.3,
+        LineEnd::Diamond => size * 0.45,
+        LineEnd::Bar => width / 2.0,
     }
-    let head = (st.width * 3.0 + 8.0).min(len * 0.6);
-    let angle = (by - ay).atan2(bx - ax);
-    // Half the head's opening angle, in radians (about 26°).
-    let spread = 0.45;
-    let (ux, uy) = (angle.cos(), angle.sin());
+}
+
+/// How much of the line to leave out under an end: the line stops inside
+/// a filled head, so its round cap can't poke out of the tip, and at the
+/// rim of a hollow circle. Other ends sit on top of the line's end.
+fn end_trim(end: LineEnd, size: f64) -> f64 {
+    match end {
+        LineEnd::Arrow => size * 0.7,
+        LineEnd::Stealth => size * 0.6,
+        LineEnd::Circle => size * 0.35,
+        _ => 0.0,
+    }
+}
+
+/// The distance between two points.
+fn dist(p: Point, q: Point) -> f64 {
+    ((q.0 - p.0).powi(2) + (q.1 - p.1).powi(2)).sqrt()
+}
+
+/// The length of the path through `pts`.
+fn path_length(pts: &[Point]) -> f64 {
+    pts.windows(2).map(|w| dist(w[0], w[1])).sum()
+}
+
+/// `pts` with the first `d` of its length removed.
+fn cut_start(pts: &[Point], d: f64) -> Vec<Point> {
+    if d <= 0.0 || pts.len() < 2 {
+        return pts.to_vec();
+    }
+    let mut left = d;
+    for i in 1..pts.len() {
+        let (p, q) = (pts[i - 1], pts[i]);
+        let seg = dist(p, q);
+        if seg > left {
+            let t = left / seg;
+            let mut out = vec![(p.0 + (q.0 - p.0) * t, p.1 + (q.1 - p.1) * t)];
+            out.extend_from_slice(&pts[i..]);
+            return out;
+        }
+        left -= seg;
+    }
+    pts[pts.len() - 1..].to_vec()
+}
+
+/// `pts` with `from_start` of its length removed at the start and
+/// `from_end` at the end.
+fn trim_path(pts: &[Point], from_start: f64, from_end: f64) -> Vec<Point> {
+    let mut v = cut_start(pts, from_start);
+    v.reverse();
+    let mut v = cut_start(&v, from_end);
+    v.reverse();
+    v
+}
+
+/// The unit direction a path leaves through its end point `pts[0]` (pass
+/// the points reversed for the far end), taken over the last `reach` of
+/// the path so a wobbly freehand stroke still gets a steady head.
+fn outward(pts: impl Iterator<Item = Point>, reach: f64) -> Option<Point> {
+    let mut pts = pts;
+    let tip = pts.next()?;
+    let mut back = None;
+    for q in pts {
+        back = Some(q);
+        if dist(q, tip) >= reach {
+            break;
+        }
+    }
+    let q = back?;
+    let d = dist(q, tip);
+    (d > 1e-9).then(|| ((tip.0 - q.0) / d, (tip.1 - q.1) / d))
+}
+
+/// Strokes a freehand stroke, line or arrow through `pts` with its line
+/// style, then draws its ends. Everything is painted with the colour's
+/// alpha applied once, so a translucent head doesn't darken the line under it.
+fn draw_stroke(cr: &Context, st: &Style, pts: &[Point]) {
+    let len = path_length(pts);
+    let ends = (st.start != LineEnd::None || st.end != LineEnd::None) && len >= 0.5;
     with_alpha(cr, st.stroke.a, || {
         set_color(cr, Rgba { a: 1.0, ..st.stroke });
-        // Shaft stops inside the head so its round cap doesn't poke out of the tip.
-        cr.move_to(ax, ay);
-        cr.line_to(bx - ux * head * 0.7, by - uy * head * 0.7);
         set_line(cr, st);
+        if !ends {
+            polyline(cr, pts);
+            let _ = cr.stroke();
+            return;
+        }
+        let size = end_size(st, len);
+        polyline(cr, &trim_path(pts, end_trim(st.start, size), end_trim(st.end, size)));
         let _ = cr.stroke();
-        // The head is filled, so it stays solid whatever the line style.
-        cr.move_to(bx, by);
-        cr.line_to(bx - head * (angle - spread).cos(), by - head * (angle - spread).sin());
-        cr.line_to(bx - head * (angle + spread).cos(), by - head * (angle + spread).sin());
+        // Ends are solid whatever the line style.
+        cr.set_dash(&[], 0.0);
+        let reach = size.min(len);
+        if let Some(dir) = outward(pts.iter().copied(), reach) {
+            draw_end(cr, st.start, pts[0], dir, size, st.width);
+        }
+        if let Some(dir) = outward(pts.iter().rev().copied(), reach) {
+            draw_end(cr, st.end, pts[pts.len() - 1], dir, size, st.width);
+        }
+    });
+}
+
+/// Draws one end at `tip`, where the line leaves in direction `(ux, uy)`
+/// (a unit vector), in the current colour. `size` is an arrowhead's length;
+/// outlined ends use the line's `width`.
+fn draw_end(cr: &Context, end: LineEnd, tip: Point, (ux, uy): Point, size: f64, width: f64) {
+    // A point `along` back down the line from the tip and `across` to its side.
+    let at = |along: f64, across: f64| (tip.0 - ux * along - uy * across, tip.1 - uy * along + ux * across);
+    let polygon = |pts: &[Point]| {
+        polyline(cr, pts);
         cr.close_path();
         let _ = cr.fill();
-    });
+    };
+    let (sin, cos) = ARROW_SPREAD.sin_cos();
+    let (wsin, wcos) = WIDE_SPREAD.sin_cos();
+    match end {
+        LineEnd::None => {}
+        LineEnd::Arrow => polygon(&[tip, at(size * cos, size * sin), at(size * cos, -size * sin)]),
+        LineEnd::Stealth => {
+            polygon(&[tip, at(size * wcos, size * wsin), at(size * 0.6, 0.0), at(size * wcos, -size * wsin)])
+        }
+        LineEnd::OpenArrow => {
+            let (l, r) = (at(size * wcos, size * wsin), at(size * wcos, -size * wsin));
+            cr.move_to(l.0, l.1);
+            cr.line_to(tip.0, tip.1);
+            cr.line_to(r.0, r.1);
+            cr.set_line_width(width);
+            let _ = cr.stroke();
+        }
+        LineEnd::Dot => {
+            cr.new_sub_path();
+            cr.arc(tip.0, tip.1, size * 0.35, 0.0, 2.0 * PI);
+            let _ = cr.fill();
+        }
+        LineEnd::Circle => {
+            cr.new_sub_path();
+            cr.arc(tip.0, tip.1, size * 0.35, 0.0, 2.0 * PI);
+            cr.set_line_width(width);
+            let _ = cr.stroke();
+        }
+        LineEnd::Square => {
+            let h = size * 0.3;
+            polygon(&[at(-h, -h), at(-h, h), at(h, h), at(h, -h)]);
+        }
+        LineEnd::Diamond => {
+            let (l, w) = (size * 0.45, size * 0.3);
+            polygon(&[at(-l, 0.0), at(0.0, w), at(l, 0.0), at(0.0, -w)]);
+        }
+        LineEnd::Bar => {
+            let (l, r) = (at(0.0, size * 0.45), at(0.0, -size * 0.45));
+            cr.move_to(l.0, l.1);
+            cr.line_to(r.0, r.1);
+            cr.set_line_width(width);
+            let _ = cr.stroke();
+        }
+    }
 }
 
 /// Renders the marked-up image at full resolution, cropped.
@@ -618,7 +760,7 @@ mod tests {
     /// A half-transparent arrow is evenly grey, even where shaft and head meet.
     #[test]
     fn translucent_arrow_has_no_dark_overlap() {
-        let style = Style { stroke: Rgba::new(0.0, 0.0, 0.0, 0.5), width: 4.0, ..Style::default() };
+        let style = Style { stroke: Rgba::new(0.0, 0.0, 0.0, 0.5), width: 4.0, end: LineEnd::Arrow, ..Style::default() };
         let mut arrow = Shape::new(Kind::Arrow, (10.0, 50.0), style);
         arrow.b = (190.0, 50.0);
         let px = draw_on_white(&arrow);
@@ -670,13 +812,99 @@ mod tests {
     #[test]
     fn dashed_arrow_keeps_a_solid_head() {
         use crate::document::LineStyle;
-        let style = Style { stroke: Rgba::new(0.0, 0.0, 0.0, 1.0), width: 4.0, line: LineStyle::Dotted, ..Style::default() };
+        let style = Style {
+            stroke: Rgba::new(0.0, 0.0, 0.0, 1.0),
+            width: 4.0,
+            line: LineStyle::Dotted,
+            end: LineEnd::Arrow,
+            ..Style::default()
+        };
         let mut arrow = Shape::new(Kind::Arrow, (10.0, 50.0), style);
         arrow.b = (190.0, 50.0);
         let px = draw_on_white(&arrow);
         for x in [178, 182, 186] {
             assert!(px(x, 50).0 < 128, "head at {x}");
         }
+    }
+
+    /// Counts dark pixels inside `r`, outside a horizontal line's own band
+    /// (|y − 50| ≤ half the width): the ink an end adds.
+    fn ink_off_line(px: &impl Fn(i32, i32) -> (u8, u8, u8), r: std::ops::Range<i32>, half: i32) -> usize {
+        r.flat_map(|x| (20..80).map(move |y| (x, y)))
+            .filter(|&(x, y)| (y - 50i32).abs() > half + 1 && px(x, y).0 < 128)
+            .count()
+    }
+
+    /// Every end but None adds ink at its own end only, and grows with the
+    /// line width.
+    #[test]
+    fn line_ends_draw_at_their_end_and_scale_with_width() {
+        let line = |width: f64, start: LineEnd, end: LineEnd| {
+            let style = Style { stroke: Rgba::new(0.0, 0.0, 0.0, 1.0), width, start, end, ..Style::default() };
+            let mut shape = Shape::new(Kind::Line, (40.0, 50.0), style);
+            shape.b = (160.0, 50.0);
+            draw_on_white(&shape)
+        };
+        for e in LineEnd::ALL {
+            let at_end = line(4.0, LineEnd::None, e);
+            let (near_a, near_b) = (ink_off_line(&at_end, 20..80, 2), ink_off_line(&at_end, 120..180, 2));
+            assert_eq!(near_a, 0, "{e:?} drew at the start");
+            let at_start = line(4.0, e, LineEnd::None);
+            assert_eq!(ink_off_line(&at_start, 120..180, 2), 0, "{e:?} drew at the end");
+            if e == LineEnd::None {
+                assert_eq!(near_b, 0);
+                continue;
+            }
+            assert!(near_b > 0, "{e:?} drew nothing");
+            // The same shape at the start (give or take antialiasing).
+            let mirrored = ink_off_line(&at_start, 20..80, 2);
+            assert!(mirrored.abs_diff(near_b) * 10 <= near_b, "{e:?} start mirrors end: {mirrored} vs {near_b}");
+            let wide = line(8.0, LineEnd::None, e);
+            assert!(ink_off_line(&wide, 120..180, 4) > near_b, "{e:?} grows with width");
+        }
+    }
+
+    /// The line stops inside a filled head and at a hollow circle's rim,
+    /// so neither its cap nor its colour shows through.
+    #[test]
+    fn line_stops_under_heads_and_circles() {
+        let style = |end| Style { stroke: Rgba::new(0.0, 0.0, 0.0, 1.0), width: 4.0, end, ..Style::default() };
+        let mut ring = Shape::new(Kind::Line, (20.0, 50.0), style(LineEnd::Circle));
+        ring.b = (160.0, 50.0);
+        let px = draw_on_white(&ring);
+        // Size 20, radius 7: the ring is centred on 160, empty inside.
+        assert!(px(160, 50).0 > 200, "inside the circle is clear");
+        assert!(px(153, 50).0 < 128, "the rim");
+        assert!(px(167, 50).0 < 128, "the far rim");
+        assert!(px(172, 50).0 > 200, "nothing past the rim");
+        // Nothing past an arrow's tip but the antialiased edge.
+        let mut arrow = Shape::new(Kind::Line, (20.0, 50.0), style(LineEnd::Arrow));
+        arrow.b = (160.0, 50.0);
+        assert!(draw_on_white(&arrow)(162, 50).0 > 200);
+    }
+
+    /// A freehand stroke's head points the way the stroke was going at its
+    /// end: right, then down, ends with a head pointing down.
+    #[test]
+    fn pen_end_follows_the_stroke() {
+        let style = Style { stroke: Rgba::new(0.0, 0.0, 0.0, 1.0), width: 2.0, end: LineEnd::Arrow, ..Style::default() };
+        let pts: Vec<Point> = (0..=20).map(|i| (40.0 + i as f64 * 3.0, 20.0)).chain((1..=20).map(|i| (100.0, 20.0 + i as f64 * 3.0))).collect();
+        let shape = Shape::new(Kind::Pen(pts), (0.0, 0.0), style);
+        let px = draw_on_white(&shape);
+        // Head 14 long ending at (100, 80): wide across x just above the tip.
+        assert!(px(97, 70).0 < 128 && px(103, 70).0 < 128, "head spreads sideways");
+        assert!(px(100, 83).0 > 200, "nothing past the tip");
+    }
+
+    /// Trimming takes length off either end of a path, across corners.
+    #[test]
+    fn trim_path_cuts_by_length() {
+        let pts = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0)];
+        assert_eq!(trim_path(&pts, 0.0, 0.0), pts.to_vec());
+        assert_eq!(trim_path(&pts, 4.0, 0.0), vec![(4.0, 0.0), (10.0, 0.0), (10.0, 10.0)]);
+        assert_eq!(trim_path(&pts, 12.0, 3.0), vec![(10.0, 2.0), (10.0, 7.0)]);
+        assert_eq!(trim_path(&pts, 30.0, 0.0), vec![(10.0, 10.0)]);
+        assert_eq!(path_length(&pts), 20.0);
     }
 
     /// Border off: only the fill is painted.
@@ -815,6 +1043,9 @@ mod tests {
         let style = Style { fill: Some(Rgba::new(1.0, 0.95, 0.6, 1.0)), font_size: 20.0, ..Style::default() };
         let add = |kind: Kind, a: Point, b: Point, label: &str, h: HAlign, v: VAlign, angle: f64| {
             let mut s = Shape::new(kind, a, style.clone());
+            if matches!(s.kind, Kind::Arrow) {
+                s.style.end = LineEnd::Arrow;
+            }
             s.b = b;
             s.label = label.into();
             s.halign = h;
@@ -833,6 +1064,48 @@ mod tests {
         add(Kind::Line, (500.0, 420.0), (500.0, 580.0), "Vertical", HAlign::Center, VAlign::Top, 0.0);
         drop(cr);
         let path = std::env::temp_dir().join("pygoscribe-label-sheet.png");
+        texture_from_surface(surface).unwrap().save_to_png(&path).unwrap();
+        eprintln!("wrote {}", path.display());
+    }
+
+    /// Writes every line end at three widths, on lines, a dashed line and a
+    /// curved freehand stroke, to a PNG for checking by eye
+    /// (`cargo test line_end_sheet -- --ignored`).
+    #[test]
+    #[ignore]
+    fn line_end_sheet() {
+        let n = LineEnd::ALL.len() as f64;
+        let surface = ImageSurface::create(cairo::Format::ARgb32, 1000, (n * 60.0 + 20.0) as i32).unwrap();
+        let cr = Context::new(&surface).unwrap();
+        cr.set_source_rgb(1.0, 1.0, 1.0);
+        cr.paint().unwrap();
+        for (row, e) in LineEnd::ALL.into_iter().enumerate() {
+            let y = 40.0 + row as f64 * 60.0;
+            for (col, width) in [2.0, 4.0, 10.0].into_iter().enumerate() {
+                let x = 20.0 + col as f64 * 200.0;
+                let style = Style { width, start: e, end: e, ..Style::default() };
+                let mut s = Shape::new(Kind::Line, (x + 20.0, y), style);
+                s.b = (x + 170.0, y);
+                draw_shape_on(&cr, &|_: &Context| {}, &s);
+            }
+            let style = Style {
+                width: 4.0,
+                line: crate::document::LineStyle::Dashed,
+                stroke: Rgba::new(0.1, 0.3, 0.9, 0.6),
+                end: e,
+                ..Style::default()
+            };
+            let mut s = Shape::new(Kind::Line, (640.0, y + 15.0), style.clone());
+            s.b = (780.0, y - 15.0);
+            draw_shape_on(&cr, &|_: &Context| {}, &s);
+            let pts: Vec<Point> = (0..=30).map(|i| {
+                let t = i as f64 / 30.0 * PI;
+                (820.0 + t * 45.0, y + 18.0 * t.sin())
+            }).collect();
+            draw_shape_on(&cr, &|_: &Context| {}, &Shape::new(Kind::Pen(pts), (0.0, 0.0), Style { end: e, ..style }));
+        }
+        drop(cr);
+        let path = std::env::temp_dir().join("pygoscribe-line-end-sheet.png");
         texture_from_surface(surface).unwrap().save_to_png(&path).unwrap();
         eprintln!("wrote {}", path.display());
     }

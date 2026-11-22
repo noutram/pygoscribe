@@ -50,6 +50,7 @@ All four planned steps are done.
 | 0.1.21 | Drag images and PDFs (or image data) onto a window to open them | Released 20 Nov (`v0.1.21`) |
 | 0.1.22 | Select several pages in the sidebar (Ctrl/Shift+click, Ctrl+A) and delete them together, with one Undo | Released 20 Nov (`v0.1.22`) |
 | 0.1.23 | Line style (solid, dashed, dotted, dash dot, dash dot dot, long dash) for drawing, lines, arrows and shape borders | Released 20 Nov (`v0.1.23`) |
+| 0.1.24 | Line ends (arrow, open arrow, swept arrow, dot, circle, square, diamond, bar) at either end of drawings, lines and arrows | On branch `feature/line-ends`, not yet released |
 
 ## Architecture
 
@@ -67,7 +68,7 @@ All four planned steps are done.
 | `src/pages.rs` | What is open: one picture or every PDF page; each page's marks and undo history; thumbnails. |
 | `src/sidebar.rs` | Page sidebar: `AdwOverlaySplitView` with a `GtkListBox` of thumbnails, drawn in idle time; drag a thumbnail to reorder pages; select several (Ctrl/Shift+click, Ctrl+A) and delete them with one Undo. |
 | `src/output.rs` | Export: clipboard, save PNG/JPEG/PDF, Open With (FileLauncher / OpenURI portal), Email. |
-| `src/settings.rs` | Remembered settings: style (including line style), open/save folders, save format, in a GLib key file. |
+| `src/settings.rs` | Remembered settings: style (including line style and each tool's line ends), open/save folders, save format, in a GLib key file. |
 | `src/autostart.rs` | Start at login: `~/.config/autostart/<app id>.desktop` natively, Background portal in Flatpak. |
 | `src/migrate.rs` | One-time carry-over of settings and Start at Login from releases before 0.1.16 (old IDs are in its module comment). |
 | `build.rs` + `data/icons/resources.gresource.xml` | Bundles the `markup-*-symbolic` tool icons as a GResource. |
@@ -205,7 +206,7 @@ poppler-rs 0.26, cairo-rs 0.22 (feature `pdf`), edition 2024. Flatpak uses GNOME
   `<Alt>`, GNOME swallows Alt+drag, so Super (and Meta) also rotate.
 - **Transparent colours** (0.1.5, Nick chose "both": opacity *and* a
   none option). Border and fill each get a `ColourControl` in `window.rs`:
-  the colour button plus a "NN%" menu button with a slider and presets; it
+  the colour button plus an opacity slider and presets (a "NN%" menu button before 0.1.24); it
   sets the colour's alpha, and the colour dialog's own alpha slider stays in
   step. A Border toggle (`Style::border`, `border-on` in settings) turns off
   the outline of rectangles, ovals and bubbles only (`Kind::has_optional_border`);
@@ -218,7 +219,7 @@ poppler-rs 0.26, cairo-rs 0.22 (feature `pdf`), edition 2024. Flatpak uses GNOME
   Plan: `docs/plans/transparent-colours.md`.
 - **Text font** (0.1.6). `Style::font` holds a Pango font description
   without a size ("Sans", "DejaVu Serif Bold Italic"); `font=` in
-  settings.ini. The toolbar has a `GtkFontDialogButton` (level Face, so
+  settings.ini. The Text pop-up (toolbar before 0.1.24) has a `GtkFontDialogButton` (level Face, so
   family plus style, no size; the spin button keeps the size) whose label is
   ellipsized so long names don't widen the window; the tooltip shows the full
   name. Text is now drawn and measured with **pangocairo** (new dependency)
@@ -260,8 +261,8 @@ poppler-rs 0.26, cairo-rs 0.22 (feature `pdf`), edition 2024. Flatpak uses GNOME
   `[view] sidebar-visible`. Page Up/Down, Home/End (canvas focus) and
   Alt+Up/Down change page. Thumbnails are drawn a few per idle tick and
   redrawn 300 ms after the page's history changes; marked pages get a dot.
-  No collapse breakpoint: the toolbar already makes the window ~1300 px
-  minimum, and an `AdwBreakpoint` made libadwaita clip the window instead.
+  No collapse breakpoint: the toolbar made the window ~1300 px minimum
+  (before the 0.1.24 grouping), and an `AdwBreakpoint` made libadwaita clip the window instead.
   **Save as PDF with a PDF open writes every page as vectors**: poppler
   draws each page straight into a `cairo::PdfSurface` and the marks go on
   top (`render::draw_page` takes a background painter, which the loupe
@@ -467,10 +468,63 @@ poppler-rs 0.26, cairo-rs 0.22 (feature `pdf`), edition 2024. Flatpak uses GNOME
   width, `Document::scale` needs no change and PDF output gets real vector
   dashes. A dot is 0.05w long, not 0: Cairo's stroker drops zero-length
   dashes that aren't first in the pattern, so dash-dot lost its dots. The
-  toolbar control is a `GtkDropDown` after Width whose button shows only a
+  control is a `GtkDropDown` (in the Line pop-up since 0.1.24) whose button shows only a
   drawn sample (to keep the toolbar narrow) and whose list shows sample
   plus name. Tests: `dashed_line_has_gaps_that_scale_with_width`,
   `dashed_arrow_keeps_a_solid_head`.
+- **Line ends** (0.1.24, Nick's request 22 Nov 2026). `Style::start` and
+  `Style::end` are `LineEnd`s (None, Arrow, Open Arrow, Swept Arrow
+  (`stealth`), Dot, Circle, Square, Diamond, Bar). They apply to pen
+  strokes, lines and arrows; `Kind::Arrow` is now drawn exactly like
+  `Kind::Line` (`render::draw_stroke`) and only differs by its default
+  ends. Each of Pen, Line and Arrow (`EndsFor`) remembers its own pair in
+  settings.ini (`pen-start`, `pen-end`, `line-start`, `line-end`,
+  `arrow-start`, `arrow-end`; unknown ids fall back to the default, which
+  is an arrowhead at the arrow's end and nothing elsewhere). Choosing one
+  of those tools loads its pair into the toolbar (`StyleControls::
+  set_ends_for`); selecting a mark shows that mark's ends, and a change is
+  saved for the selected mark's kind. The controls are greyed out for other
+  tools and marks. Sizes come from `render::end_size`, the old arrowhead
+  length `3w + 8`, capped at 60 % of the line (40 % each when both ends are
+  drawn), so ends scale with width and with Scale to Visible Size. The line
+  is trimmed under filled heads and at a hollow circle's rim
+  (`end_trim`, `trim_path`) so its round cap never pokes out; ends are drawn
+  with no dash; the whole stroke plus ends is one `with_alpha` group, so a
+  translucent head doesn't darken the line under it, and the PDF stays
+  vector (a transparency group, no images; test
+  `saves_line_ends_as_vector`). On a pen stroke the end's direction is
+  taken over the last head-length of the path (`outward`) so wobbles don't
+  twist it. Line labels keep clear of both ends (`end_reach`). The two
+  drop-downs reuse the line style's sample drop-down (`sample_dropdown`);
+  samples are drawn by the real renderer. A dashed
+  line can end in a gap just before its end. `cargo test line_end_sheet --
+  --ignored` writes a PNG of every end for checking by eye.
+- **Grouped toolbar** (0.1.24, Nick 22 Nov 2026: "The toolbar is taking
+  too much horizontal space"). Width, Line Style, Start and End moved into
+  a Line pop-up (`line_menu`): a `GtkMenuButton` whose child is a drawn
+  sample of the current line (dashes, and ends while they apply), redrawn
+  when any of the four changes. Font and size moved into a Text pop-up
+  (`text_menu`), whose button reads "Aa 28" in the chosen font. Both use
+  `form` (heading plus a grid of dimmed captions). The widgets and their
+  signals are unchanged, only re-parented, so restyling, settings and
+  syncing work as before. Measured in Broadway, the toolbar went from about
+  1590 px to about 930 px with Line and Text grouped, so the 1000 px default window fits it again.
+  Then, at Nick's request, the Border and Fill toggles, colour buttons and
+  opacity buttons moved into a Colours pop-up (`colours_menu`), whose
+  button draws a small box in the current border and fill (left out while
+  off; the border still shows while its toggle is greyed out, since lines
+  and text use that colour). The toolbar is now about 640 px: tools, then
+  Colours, Line and Text.
+  **No pop-up inside a pop-up.** The first version put the line style and
+  end drop-downs, and the opacity menu buttons, inside the pop-ups; Nick
+  found the Line pop-up sometimes wouldn't close when clicking away (a
+  nested popup's grab not handed back). Style, Start and End are now rows
+  of flat toggle buttons with drawn samples and the name as tooltip
+  (`sample_choice`); an unshown `GtkDropDown` still holds each choice, so
+  `selected`, its notify signal and sensitivity work as before, and the
+  row follows it both ways. Opacity is an inline slider with the presets
+  under it (`ColourControl::presets`). Only the colour and font dialogs
+  open from the pop-ups, and those are dialogs, not popovers.
 - **Snap was tried and abandoned** (Nick, 11 Nov: "stick with flatpak").
   `snapcraft --destructive-mode` refuses because Nick's laptop has Ubuntu Pro
   attached, and the LXD build kept failing on the Rust plugin's rustup check.

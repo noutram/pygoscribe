@@ -166,6 +166,125 @@ impl LineStyle {
     }
 }
 
+/// What is drawn at one end of a freehand stroke, line or arrow. Ends grow
+/// with the line width and are always solid, whatever the line style.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LineEnd {
+    /// Just the line's own round end.
+    #[default]
+    None,
+    /// A filled triangular arrowhead.
+    Arrow,
+    /// An open, V-shaped arrowhead drawn with the line.
+    OpenArrow,
+    /// A filled arrowhead with a swept-back notch.
+    Stealth,
+    /// A filled round dot.
+    Dot,
+    /// A hollow circle.
+    Circle,
+    /// A filled square, turned with the line.
+    Square,
+    /// A filled diamond.
+    Diamond,
+    /// A short bar across the line.
+    Bar,
+}
+
+impl LineEnd {
+    /// Every end, in the order the tool bar lists them.
+    pub const ALL: [LineEnd; 9] = [
+        LineEnd::None,
+        LineEnd::Arrow,
+        LineEnd::OpenArrow,
+        LineEnd::Stealth,
+        LineEnd::Dot,
+        LineEnd::Circle,
+        LineEnd::Square,
+        LineEnd::Diamond,
+        LineEnd::Bar,
+    ];
+
+    /// A stable name, stored in the settings file.
+    pub fn id(self) -> &'static str {
+        match self {
+            LineEnd::None => "none",
+            LineEnd::Arrow => "arrow",
+            LineEnd::OpenArrow => "open-arrow",
+            LineEnd::Stealth => "stealth",
+            LineEnd::Dot => "dot",
+            LineEnd::Circle => "circle",
+            LineEnd::Square => "square",
+            LineEnd::Diamond => "diamond",
+            LineEnd::Bar => "bar",
+        }
+    }
+
+    /// The inverse of [`Self::id`].
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|e| e.id() == id)
+    }
+
+    /// The name shown to the user.
+    pub fn label(self) -> &'static str {
+        match self {
+            LineEnd::None => "None",
+            LineEnd::Arrow => "Arrow",
+            LineEnd::OpenArrow => "Open Arrow",
+            LineEnd::Stealth => "Swept Arrow",
+            LineEnd::Dot => "Dot",
+            LineEnd::Circle => "Circle",
+            LineEnd::Square => "Square",
+            LineEnd::Diamond => "Diamond",
+            LineEnd::Bar => "Bar",
+        }
+    }
+}
+
+/// The marks that have line ends: freehand strokes, lines and arrows. Each
+/// remembers its own pair, so the Arrow tool keeps its head while the Line
+/// tool stays plain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndsFor {
+    /// Freehand (Pen) strokes.
+    Pen,
+    /// Lines.
+    Line,
+    /// Arrows.
+    Arrow,
+}
+
+impl EndsFor {
+    /// Which pair a tool's new marks use, if it draws lines with ends.
+    pub fn of_tool(tool: Tool) -> Option<Self> {
+        match tool {
+            Tool::Pen => Some(EndsFor::Pen),
+            Tool::Line => Some(EndsFor::Line),
+            Tool::Arrow => Some(EndsFor::Arrow),
+            _ => None,
+        }
+    }
+
+    /// Which pair a mark of `kind` belongs to, if it has ends.
+    pub fn of_kind(kind: &Kind) -> Option<Self> {
+        match kind {
+            Kind::Pen(_) => Some(EndsFor::Pen),
+            Kind::Line => Some(EndsFor::Line),
+            Kind::Arrow => Some(EndsFor::Arrow),
+            _ => None,
+        }
+    }
+
+    /// The (start, end) pair before the user picks one: an arrowhead at
+    /// the end of an arrow, nothing elsewhere.
+    pub fn default_ends(self) -> (LineEnd, LineEnd) {
+        match self {
+            EndsFor::Arrow => (LineEnd::None, LineEnd::Arrow),
+            EndsFor::Pen | EndsFor::Line => (LineEnd::None, LineEnd::None),
+        }
+    }
+}
+
 /// How a mark looks. New marks copy the tool bar's current style.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Style {
@@ -184,6 +303,10 @@ pub struct Style {
     pub font: String,
     /// The dash pattern of lines and borders.
     pub line: LineStyle,
+    /// What is drawn where a stroke, line or arrow starts.
+    pub start: LineEnd,
+    /// What is drawn where it ends.
+    pub end: LineEnd,
 }
 
 /// GNOME red, 4 px solid lines, 28 px Sans, border on and no fill.
@@ -197,6 +320,8 @@ impl Default for Style {
             font_size: 28.0,
             font: DEFAULT_FONT.to_string(),
             line: LineStyle::Solid,
+            start: LineEnd::None,
+            end: LineEnd::None,
         }
     }
 }
@@ -210,7 +335,8 @@ pub enum Kind {
     Highlighter(Vec<Point>),
     /// A straight line from `a` to `b`.
     Line,
-    /// An arrow from `a` to a head at `b`.
+    /// A line from `a` to `b` made with the Arrow tool. It is drawn like
+    /// a line; the Arrow tool's own remembered ends give it its head.
     Arrow,
     /// A rectangle with corners `a` and `b`.
     Rect,

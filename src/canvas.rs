@@ -48,7 +48,7 @@
 //! then renders just the visible region again with Poppler at the screen's
 //! resolution ([`Hires`]), drawing it over the blurry base image.
 
-use crate::document::{Document, HAlign, History, Kind, Point, Rect, Rgba, Shape, Style, Tool, VAlign};
+use crate::document::{Document, EndsFor, HAlign, History, Kind, Point, Rect, Rgba, Shape, Style, Tool, VAlign};
 use crate::pages::PageState;
 use crate::render;
 use crate::view::{self, MARGIN};
@@ -563,6 +563,17 @@ impl Canvas {
         match st.selected.and_then(|i| st.doc.shapes.get(i)) {
             Some(shape) => shape.kind.has_optional_border(),
             None => st.tool == Tool::Select || st.tool.has_optional_border(),
+        }
+    }
+
+    /// Which kind of mark the Line Start and Line End controls apply to:
+    /// the selected mark's, or the current tool's new marks. None when
+    /// neither has ends.
+    pub fn ends_for(&self) -> Option<EndsFor> {
+        let st = self.st();
+        match st.selected.and_then(|i| st.doc.shapes.get(i)) {
+            Some(shape) => EndsFor::of_kind(&shape.kind),
+            None => EndsFor::of_tool(st.tool),
         }
     }
 

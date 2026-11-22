@@ -18,7 +18,7 @@
 //! AdwApplicationWindow
 //! └─ AdwToolbarView
 //!    ├─ AdwHeaderBar   pages · paste · open · zoom · scale … undo · send · save · copy · menu
-//!    ├─ toolbar        tool buttons · border/fill colours · width · line style · font · size
+//!    ├─ toolbar        tool buttons · Colours pop-up · Line pop-up · Text pop-up
 //!    └─ AdwToastOverlay
 //!       └─ AdwOverlaySplitView (Sidebar)
 //!          ├─ page thumbnails
@@ -39,7 +39,7 @@
 //! token straight back to GNOME Shell so its busy pointer stops.
 
 use crate::canvas::Canvas;
-use crate::document::{LineStyle, Rgba, Style, Tool};
+use crate::document::{EndsFor, LineEnd, LineStyle, Rgba, Style, Tool};
 use crate::pages::{PageState, Pages};
 use crate::settings::SaveFormat;
 use crate::sidebar::Sidebar;
@@ -94,13 +94,17 @@ fn from_gdk(c: &gdk::RGBA) -> Rgba {
     Rgba::new(c.red() as f64, c.green() as f64, c.blue() as f64, c.alpha() as f64)
 }
 
-/// A colour button with an opacity control beside it: a menu button showing
-/// the opacity ("50%") that opens a slider and presets. The colour dialog's
-/// own alpha slider stays available and the two agree.
+/// A colour button with an opacity slider beside it and preset buttons
+/// (`presets`) to go under it. The colour dialog's own alpha slider stays
+/// available and the two agree. They sit straight in the Colours pop-up:
+/// a pop-up opened from inside another one could leave the outer pop-up
+/// unable to close by clicking away.
 #[derive(Clone)]
 struct ColourControl {
-    /// The colour button and opacity button side by side.
+    /// The colour button and opacity slider side by side.
     widget: gtk::Box,
+    /// 100/75/50/25 % buttons.
+    presets: gtk::Box,
     /// Opens GTK's colour chooser (with alpha).
     colour: gtk::ColorDialogButton,
     /// Opacity in percent, 0–100; mirrors the colour's alpha.
@@ -124,7 +128,8 @@ impl ColourControl {
         scale.set_draw_value(true);
         scale.set_value_pos(gtk::PositionType::Right);
         scale.set_format_value_func(|_, v| format!("{v:.0}%"));
-        scale.set_size_request(180, -1);
+        scale.set_size_request(160, -1);
+        scale.set_tooltip_text(Some(&format!("{what} Opacity")));
         let presets = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         presets.add_css_class("linked");
         presets.set_homogeneous(true);
@@ -134,34 +139,19 @@ impl ColourControl {
             b.connect_clicked(move |_| adj.set_value(p as f64));
             presets.append(&b);
         }
-        let title = gtk::Label::new(Some(&format!("{what} Opacity")));
-        title.add_css_class("heading");
-        title.set_xalign(0.0);
-        let body = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        body.append(&title);
-        body.append(&scale);
-        body.append(&presets);
-        let popover = gtk::Popover::builder().child(&body).build();
-        let menu = gtk::MenuButton::builder()
-            .popover(&popover)
-            .tooltip_text(format!("{what} Opacity"))
-            .always_show_arrow(false)
-            .build();
-        menu.add_css_class("flat");
-        menu.add_css_class("numeric");
+        presets.set_halign(gtk::Align::End);
+        presets.set_tooltip_text(Some(&format!("{what} Opacity")));
 
-        let widget = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        let widget = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         widget.append(&colour);
-        widget.append(&menu);
+        widget.append(&scale);
 
-        let this = Self { widget, colour, opacity };
-        // Keep the slider, the button's label and the colour's alpha in step.
-        // Setting an equal value emits nothing, so this doesn't loop.
+        let this = Self { widget, presets, colour, opacity };
+        // Keep the slider and the colour's alpha in step. Setting an equal
+        // value emits nothing, so this doesn't loop.
         {
             let this2 = this.clone();
-            let menu = menu.clone();
             this.opacity.connect_value_changed(move |adj| {
-                menu.set_label(&format!("{:.0}%", adj.value()));
                 let mut c = this2.colour.rgba();
                 let a = (adj.value() / 100.0) as f32;
                 if (c.alpha() - a).abs() > 1e-4 {
@@ -179,7 +169,6 @@ impl ColourControl {
                 }
             });
         }
-        menu.set_label("100%");
         this.set(c);
         this
     }
@@ -216,10 +205,23 @@ struct StyleControls {
     width: gtk::SpinButton,
     /// Solid, dashed, dotted… (index into [`LineStyle::ALL`]).
     line: gtk::DropDown,
+    /// What starts a stroke, line or arrow (index into [`LineEnd::ALL`]).
+    start: gtk::DropDown,
+    /// What ends it.
+    end: gtk::DropDown,
+    /// Which kind of mark the two end controls belong to, so a change is
+    /// remembered for that kind; None while they don't apply.
+    ends_for: Rc<Cell<Option<EndsFor>>>,
     /// Text size.
     font: gtk::SpinButton,
     /// Font family and style (no size).
     face: gtk::FontDialogButton,
+    /// The tool-bar button that opens the border and fill colours.
+    colours_menu: gtk::MenuButton,
+    /// The tool-bar button that opens width, line style and ends.
+    line_menu: gtk::MenuButton,
+    /// The tool-bar button that opens the text font and size.
+    text_menu: gtk::MenuButton,
     /// Set while [`Self::show`] loads a selected mark's style into the
     /// controls, so that isn't mistaken for the user restyling it.
     syncing: Rc<Cell<bool>>,
@@ -245,7 +247,9 @@ impl StyleControls {
         let width = gtk::SpinButton::with_range(lo, hi, 1.0);
         width.set_value(saved.width);
         width.set_tooltip_text(Some("Line Width"));
-        let line = line_style_dropdown(saved.line);
+        let (line, line_row) = line_style_dropdown(saved.line);
+        let (start, start_row) = line_end_dropdown(saved.line_ends.0, true);
+        let (end, end_row) = line_end_dropdown(saved.line_ends.1, false);
         let (lo, hi) = crate::settings::FONT_RANGE;
         let font = gtk::SpinButton::with_range(lo, hi, 2.0);
         font.set_value(saved.font_size);
@@ -274,8 +278,8 @@ impl StyleControls {
         while let Some(w) = child {
             if let Some(l) = w.downcast_ref::<gtk::Label>() {
                 l.set_ellipsize(gtk::pango::EllipsizeMode::End);
-                l.set_width_chars(10);
-                l.set_max_width_chars(16);
+                l.set_width_chars(12);
+                l.set_max_width_chars(24);
             }
             child = w.first_child().or_else(|| {
                 let mut w = Some(w);
@@ -288,7 +292,27 @@ impl StyleControls {
                 None
             });
         }
-        let this = Self { border_on, stroke, fill_on, fill, width, line, font, face, syncing: Rc::new(Cell::new(false)) };
+        let colours_menu = colours_menu(&border_on, &stroke, &fill_on, &fill);
+        let line_menu = line_menu(&width, &line, &start, &end, [line_row, start_row, end_row]);
+        let text_menu = text_menu(&face, &font);
+        let this = Self {
+            colours_menu,
+            line_menu,
+            text_menu,
+            border_on,
+            stroke,
+            fill_on,
+            fill,
+            width,
+            line,
+            start,
+            end,
+            ends_for: Rc::new(Cell::new(None)),
+            font,
+            face,
+            syncing: Rc::new(Cell::new(false)),
+        };
+        this.set_ends_for(None, false);
         // A shape needs a border or a fill: turning one off turns the other on.
         // Connected before `connect_changed`, so the change is seen as one.
         let other = this.fill_on.clone();
@@ -316,6 +340,24 @@ impl StyleControls {
             font_size: self.font.value(),
             font: self.font_name(),
             line: self.line_style(),
+            start: end_at(&self.start),
+            end: end_at(&self.end),
+        }
+    }
+
+    /// Points the Line Start and Line End controls at `kind`'s marks
+    /// (greying them out for None). With `load`, they show that kind's
+    /// remembered ends, as for a newly chosen Pen, Line or Arrow tool.
+    fn set_ends_for(&self, kind: Option<EndsFor>, load: bool) {
+        self.ends_for.set(kind);
+        self.start.set_sensitive(kind.is_some());
+        self.end.set_sensitive(kind.is_some());
+        if let (Some(kind), true) = (kind, load) {
+            let (start, end) = crate::settings::get().ends(kind);
+            self.syncing.set(true);
+            self.start.set_selected(end_index(start));
+            self.end.set_selected(end_index(end));
+            self.syncing.set(false);
         }
     }
 
@@ -344,7 +386,12 @@ impl StyleControls {
         let (width, font_size) = (self.width.value(), self.font.value());
         let font = self.font_name();
         let line = self.line_style();
+        let ends = (end_at(&self.start), end_at(&self.end));
+        let ends_for = self.ends_for.get();
         crate::settings::update(|s| {
+            if let Some(kind) = ends_for {
+                *s.ends_mut(kind) = ends;
+            }
             s.stroke = stroke;
             s.border_on = border_on;
             s.fill = fill;
@@ -370,6 +417,8 @@ impl StyleControls {
         }
         self.width.set_value(style.width);
         self.line.set_selected(line_index(style.line));
+        self.start.set_selected(end_index(style.start));
+        self.end.set_selected(end_index(style.end));
         self.font.set_value(style.font_size);
         // Only when it differs: setting it re-emits notify and rebuilds labels.
         if self.font_name() != style.font {
@@ -404,6 +453,10 @@ impl StyleControls {
         let e = emit.clone();
         self.line.connect_selected_notify(move |_| e());
         let e = emit.clone();
+        self.start.connect_selected_notify(move |_| e());
+        let e = emit.clone();
+        self.end.connect_selected_notify(move |_| e());
+        let e = emit.clone();
         self.font.connect_value_changed(move |_| e());
         self.face.connect_font_desc_notify(move |_| emit());
     }
@@ -414,63 +467,275 @@ fn line_index(style: LineStyle) -> u32 {
     LineStyle::ALL.iter().position(|&s| s == style).unwrap_or(0) as u32
 }
 
-/// The Line Style drop-down. The button shows just a sample of the chosen
-/// pattern, to keep the tool bar narrow; the list shows each sample with
-/// its name. Samples are drawn in the text colour, with the same dash
-/// pattern (and round caps) as the marks.
-fn line_style_dropdown(selected: LineStyle) -> gtk::DropDown {
-    let names: Vec<&str> = LineStyle::ALL.iter().map(|s| s.label()).collect();
-    let dropdown = gtk::DropDown::from_strings(&names);
-    dropdown.set_tooltip_text(Some("Line Style"));
-    dropdown.set_selected(line_index(selected));
-    let factory = |with_name: bool| {
-        let f = gtk::SignalListItemFactory::new();
-        f.connect_setup(move |_, item| {
-            let Some(item) = item.downcast_ref::<gtk::ListItem>() else { return };
-            let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-            let sample = gtk::DrawingArea::builder().content_width(56).content_height(16).valign(gtk::Align::Center).build();
-            row.append(&sample);
-            if with_name {
-                row.append(&gtk::Label::new(None));
-            }
-            item.set_child(Some(&row));
-        });
-        f.connect_bind(move |_, item| {
-            let Some(item) = item.downcast_ref::<gtk::ListItem>() else { return };
-            let style = LineStyle::ALL.get(item.position() as usize).copied().unwrap_or_default();
-            let Some(row) = item.child() else { return };
-            if let Some(sample) = row.first_child().and_downcast::<gtk::DrawingArea>() {
-                sample.set_draw_func(move |area, cr, w, h| {
-                    let width = 3.0;
-                    let c = area.color();
-                    cr.set_source_rgba(c.red().into(), c.green().into(), c.blue().into(), c.alpha().into());
-                    cr.set_line_width(width);
-                    cr.set_line_cap(gtk::cairo::LineCap::Round);
-                    cr.set_dash(&style.dashes(width), 0.0);
-                    let y = f64::from(h) / 2.0;
-                    cr.move_to(width, y);
-                    cr.line_to(f64::from(w) - width, y);
-                    let _ = cr.stroke();
-                });
-                sample.queue_draw();
-            }
-            if let Some(name) = row.last_child().and_downcast::<gtk::Label>() {
-                name.set_label(style.label());
-            }
-        });
-        f
-    };
-    dropdown.set_factory(Some(&factory(false)));
-    dropdown.set_list_factory(Some(&factory(true)));
-    dropdown
+/// The position of `end` in [`LineEnd::ALL`] (and the drop-downs).
+fn end_index(end: LineEnd) -> u32 {
+    LineEnd::ALL.iter().position(|&e| e == end).unwrap_or(0) as u32
 }
 
-/// A dimmed caption for a tool-bar control ("Width", "Text").
-fn label(text: &str) -> gtk::Label {
-    let l = gtk::Label::new(Some(text));
-    l.add_css_class("dim-label");
-    l.set_margin_start(6);
-    l
+/// The line end a Line Start or Line End drop-down shows.
+fn end_at(dropdown: &gtk::DropDown) -> LineEnd {
+    LineEnd::ALL.get(dropdown.selected() as usize).copied().unwrap_or_default()
+}
+
+/// A choice of drawn samples, shown as a row of buttons (one click picks
+/// one, the tooltip names it) rather than a drop-down: a drop-down's list
+/// is a pop-up of its own, and opened from inside the Line pop-up it could
+/// leave that pop-up unable to close by clicking away. The returned
+/// `GtkDropDown` is never shown; it holds the choice (`selected`, its
+/// notify signal and sensitivity) for the rest of the code, and the row
+/// follows it both ways. `draw(i, cr, w, h, colour)` draws sample `i` in
+/// the text colour.
+fn sample_choice(
+    labels: &[&str],
+    selected: u32,
+    width: i32,
+    draw: impl Fn(u32, &gtk::cairo::Context, f64, f64, gdk::RGBA) + Clone + 'static,
+) -> (gtk::DropDown, gtk::Box) {
+    let dropdown = gtk::DropDown::from_strings(labels);
+    dropdown.set_selected(selected);
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+    let mut buttons: Vec<gtk::ToggleButton> = Vec::new();
+    for (i, name) in labels.iter().enumerate() {
+        let i = i as u32;
+        let sample = gtk::DrawingArea::builder().content_width(width).content_height(18).build();
+        let d = draw.clone();
+        sample.set_draw_func(move |area, cr, w, h| d(i, cr, f64::from(w), f64::from(h), area.color()));
+        let b = gtk::ToggleButton::builder().child(&sample).tooltip_text(*name).build();
+        b.add_css_class("flat");
+        if let Some(first) = buttons.first() {
+            b.set_group(Some(first));
+        }
+        let dd = dropdown.clone();
+        b.connect_toggled(move |b| {
+            if b.is_active() && dd.selected() != i {
+                dd.set_selected(i);
+            }
+        });
+        row.append(&b);
+        buttons.push(b);
+    }
+    let sync = move |dd: &gtk::DropDown| {
+        if let Some(b) = buttons.get(dd.selected() as usize) {
+            b.set_active(true);
+        }
+    };
+    sync(&dropdown);
+    dropdown.connect_selected_notify(sync);
+    let r = row.clone();
+    dropdown.connect_sensitive_notify(move |dd| r.set_sensitive(dd.is_sensitive()));
+    (dropdown, row)
+}
+
+/// The Line Style choice. Samples use the same dash pattern (and round
+/// caps) as the marks.
+fn line_style_dropdown(selected: LineStyle) -> (gtk::DropDown, gtk::Box) {
+    let names: Vec<&str> = LineStyle::ALL.iter().map(|s| s.label()).collect();
+    sample_choice(&names, line_index(selected), 44, |i, cr, w, h, c| {
+        let style = LineStyle::ALL.get(i as usize).copied().unwrap_or_default();
+        let width = 3.0;
+        cr.set_source_rgba(c.red().into(), c.green().into(), c.blue().into(), c.alpha().into());
+        cr.set_line_width(width);
+        cr.set_line_cap(gtk::cairo::LineCap::Round);
+        cr.set_dash(&style.dashes(width), 0.0);
+        cr.move_to(width, h / 2.0);
+        cr.line_to(w - width, h / 2.0);
+        let _ = cr.stroke();
+    })
+}
+
+/// The Line Start (`at_start`) or Line End choice. Each sample is a
+/// short line drawn by the real renderer, with the end on the left for
+/// Line Start and on the right for Line End.
+fn line_end_dropdown(selected: LineEnd, at_start: bool) -> (gtk::DropDown, gtk::Box) {
+    let names: Vec<&str> = LineEnd::ALL.iter().map(|e| e.label()).collect();
+    sample_choice(&names, end_index(selected), 30, move |i, cr, w, h, c| {
+        let e = LineEnd::ALL.get(i as usize).copied().unwrap_or_default();
+        let stroke = Rgba::new(c.red().into(), c.green().into(), c.blue().into(), c.alpha().into());
+        let (start, end) = if at_start { (e, LineEnd::None) } else { (LineEnd::None, e) };
+        let style = Style { stroke, width: 2.0, start, end, ..Style::default() };
+        // The end gets the room; the line runs off the other side.
+        let (x0, x1) = if at_start { (7.0, w + 2.0) } else { (-2.0, w - 7.0) };
+        let mut shape = crate::document::Shape::new(crate::document::Kind::Line, (x0, h / 2.0), style);
+        shape.b = (x1, h / 2.0);
+        crate::render::draw_shape_on(cr, &|_: &gtk::cairo::Context| {}, &shape);
+    })
+}
+
+/// A pop-up's body: a heading over a grid of dimmed captions and controls.
+fn form(title: &str, rows: &[(&str, gtk::Widget)]) -> gtk::Box {
+    let heading = gtk::Label::new(Some(title));
+    heading.add_css_class("heading");
+    heading.set_xalign(0.0);
+    let grid = gtk::Grid::builder().row_spacing(6).column_spacing(12).build();
+    for (i, (name, w)) in rows.iter().enumerate() {
+        let l = gtk::Label::new(Some(name));
+        l.add_css_class("dim-label");
+        l.set_xalign(0.0);
+        grid.attach(&l, 0, i as i32, 1, 1);
+        w.set_hexpand(true);
+        grid.attach(w, 1, i as i32, 1, 1);
+    }
+    let body = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    body.append(&heading);
+    body.append(&grid);
+    body
+}
+
+/// The Colours button: a small box drawn with the current border and fill
+/// (each left out while it's off), opening the Border and Fill rows, each
+/// an on/off toggle, a colour button and an opacity button.
+fn colours_menu(border_on: &gtk::ToggleButton, stroke: &ColourControl, fill_on: &gtk::ToggleButton, fill: &ColourControl) -> gtk::MenuButton {
+    let sample = gtk::DrawingArea::builder().content_width(26).content_height(18).valign(gtk::Align::Center).build();
+    {
+        let (border_on, stroke, fill_on, fill) = (border_on.clone(), stroke.clone(), fill_on.clone(), fill.clone());
+        sample.set_draw_func(move |_, cr, w, h| {
+            let (w, h) = (f64::from(w), f64::from(h));
+            let set = |c: Rgba| cr.set_source_rgba(c.r, c.g, c.b, c.a);
+            cr.rectangle(2.0, 2.0, w - 4.0, h - 4.0);
+            if fill_on.is_active() {
+                set(fill.rgba());
+                let _ = cr.fill_preserve();
+            }
+            // The border shows unless it's switched off for a shape (lines
+            // and text always use the colour, so it stays while greyed out).
+            if border_on.is_active() || !border_on.is_sensitive() {
+                set(stroke.rgba());
+                cr.set_line_width(3.0);
+                let _ = cr.stroke();
+            }
+            cr.new_path();
+        });
+    }
+    let redraw = {
+        let s = sample.clone();
+        move || s.queue_draw()
+    };
+    for t in [border_on, fill_on] {
+        let r = redraw.clone();
+        t.connect_toggled(move |_| r());
+    }
+    let r = redraw.clone();
+    border_on.connect_sensitive_notify(move |_| r());
+    let r = redraw.clone();
+    stroke.connect_changed(r);
+    fill.connect_changed(redraw);
+    let row = |toggle: &gtk::ToggleButton, colour: &ColourControl| {
+        let b = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        b.append(toggle);
+        b.append(&colour.widget);
+        b.upcast::<gtk::Widget>()
+    };
+    let body = form(
+        "Colours",
+        &[
+            ("Border", row(border_on, stroke)),
+            ("", stroke.presets.clone().upcast()),
+            ("Fill", row(fill_on, fill)),
+            ("", fill.presets.clone().upcast()),
+        ],
+    );
+    let popover = gtk::Popover::builder().child(&body).build();
+    gtk::MenuButton::builder()
+        .child(&sample)
+        .popover(&popover)
+        .always_show_arrow(true)
+        .tooltip_text("Border and Fill Colours")
+        .build()
+}
+
+/// The Line button: it shows a sample of the current line (its dashes and,
+/// where they apply, its ends) and opens Width, Style, Start and End.
+/// `rows` are the Style, Start and End button rows (see [`sample_choice`]).
+fn line_menu(
+    width: &gtk::SpinButton,
+    line: &gtk::DropDown,
+    start: &gtk::DropDown,
+    end: &gtk::DropDown,
+    rows: [gtk::Box; 3],
+) -> gtk::MenuButton {
+    let sample = gtk::DrawingArea::builder().content_width(48).content_height(18).valign(gtk::Align::Center).build();
+    {
+        let (width, line, start, end) = (width.clone(), line.clone(), start.clone(), end.clone());
+        sample.set_draw_func(move |area, cr, w, h| {
+            let c = area.color();
+            let stroke = Rgba::new(c.red().into(), c.green().into(), c.blue().into(), c.alpha().into());
+            // Ends only where they apply (greyed out for shapes and text).
+            let ends = start.is_sensitive();
+            let pick = |d: &gtk::DropDown| if ends { end_at(d) } else { LineEnd::None };
+            let style = Style {
+                stroke,
+                // Thick enough to read, thin enough to fit.
+                width: (width.value() / 2.0).clamp(1.5, 3.0),
+                line: LineStyle::ALL.get(line.selected() as usize).copied().unwrap_or_default(),
+                start: pick(&start),
+                end: pick(&end),
+                ..Style::default()
+            };
+            let (w, h) = (f64::from(w), f64::from(h));
+            let mut shape = crate::document::Shape::new(crate::document::Kind::Line, (4.0, h / 2.0), style);
+            shape.b = (w - 4.0, h / 2.0);
+            crate::render::draw_shape_on(cr, &|_: &gtk::cairo::Context| {}, &shape);
+        });
+    }
+    let redraw = {
+        let s = sample.clone();
+        move || s.queue_draw()
+    };
+    let r = redraw.clone();
+    width.connect_value_changed(move |_| r());
+    for d in [line, start, end] {
+        let r = redraw.clone();
+        d.connect_selected_notify(move |_| r());
+    }
+    start.connect_sensitive_notify(move |_| redraw());
+    let [style_row, start_row, end_row] = rows;
+    // The width box stays its natural size instead of spanning the rows.
+    width.set_halign(gtk::Align::Start);
+    let body = form(
+        "Line",
+        &[
+            ("Width", width.clone().upcast()),
+            ("Style", style_row.upcast()),
+            ("Start", start_row.upcast()),
+            ("End", end_row.upcast()),
+        ],
+    );
+    let popover = gtk::Popover::builder().child(&body).build();
+    gtk::MenuButton::builder()
+        .child(&sample)
+        .popover(&popover)
+        .always_show_arrow(true)
+        .tooltip_text("Line Width, Style and Ends")
+        .build()
+}
+
+/// The Text button: "Aa" and the size, in the chosen font; it opens the
+/// font and size controls.
+fn text_menu(face: &gtk::FontDialogButton, size: &gtk::SpinButton) -> gtk::MenuButton {
+    let label = gtk::Label::new(None);
+    let body = form("Text", &[("Font", face.clone().upcast()), ("Size", size.clone().upcast())]);
+    let popover = gtk::Popover::builder().child(&body).build();
+    let menu = gtk::MenuButton::builder().child(&label).popover(&popover).always_show_arrow(true).build();
+    let update = {
+        let (face, size, menu) = (face.clone(), size.clone(), menu.clone());
+        move || {
+            let desc = face.font_desc();
+            let attrs = gtk::pango::AttrList::new();
+            if let Some(mut d) = desc.clone() {
+                d.unset_fields(gtk::pango::FontMask::SIZE);
+                attrs.insert(gtk::pango::AttrFontDesc::new(&d));
+            }
+            label.set_attributes(Some(&attrs));
+            label.set_label(&format!("Aa {:.0}", size.value()));
+            let name = desc.map(|d| d.to_str().to_string()).unwrap_or_default();
+            menu.set_tooltip_text(Some(&format!("Text: {name}, {:.0}", size.value())));
+        }
+    };
+    update();
+    let u = update.clone();
+    size.connect_value_changed(move |_| u());
+    face.connect_font_desc_notify(move |_| update());
+    menu
 }
 
 impl MarkupWindow {
@@ -626,16 +891,9 @@ impl MarkupWindow {
         }
         let style = StyleControls::new();
         toolbar.append(&gtk::Separator::new(gtk::Orientation::Vertical));
-        toolbar.append(&style.border_on);
-        toolbar.append(&style.stroke.widget);
-        toolbar.append(&style.fill_on);
-        toolbar.append(&style.fill.widget);
-        toolbar.append(&label("Width"));
-        toolbar.append(&style.width);
-        toolbar.append(&style.line);
-        toolbar.append(&label("Text"));
-        toolbar.append(&style.face);
-        toolbar.append(&style.font);
+        toolbar.append(&style.colours_menu);
+        toolbar.append(&style.line_menu);
+        toolbar.append(&style.text_menu);
 
         let canvas = Canvas::new();
         canvas.set_style(style.style());
@@ -707,11 +965,18 @@ impl MarkupWindow {
         for (tool, button) in &tool_buttons {
             let canvas = this.canvas.clone();
             let tool = *tool;
-            let border_on = style.border_on.clone();
+            let style = style.clone();
             button.connect_toggled(move |b| {
                 if b.is_active() {
                     canvas.set_tool(tool);
-                    border_on.set_sensitive(canvas.border_is_optional());
+                    style.border_on.set_sensitive(canvas.border_is_optional());
+                    // Pen, Line and Arrow each bring back their own ends
+                    // (drawing tools drop the selection, so nothing is restyled).
+                    let own = EndsFor::of_tool(tool);
+                    style.set_ends_for(canvas.ends_for(), own.is_some());
+                    if own.is_some() {
+                        canvas.set_style(style.style());
+                    }
                 }
             });
         }
@@ -776,6 +1041,7 @@ impl MarkupWindow {
                     style.show(&s);
                 }
                 style.border_on.set_sensitive(canvas.border_is_optional());
+                style.set_ends_for(canvas.ends_for(), false);
                 w.update_mark_actions();
             });
         }

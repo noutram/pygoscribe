@@ -423,6 +423,51 @@ mod tests {
         assert!(edge[2] > 200 && edge[0] < 60, "page 2's mark moved with it: {edge:?}");
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    /// Line ends are saved as vector shapes: the page has no images, and
+    /// the heads (translucent too) show where they should.
+    #[test]
+    fn saves_line_ends_as_vector() {
+        use crate::document::{Document, Kind, LineEnd, LineStyle, Rgba, Shape, Style};
+        let dir = std::env::temp_dir().join(format!("pygoscribe-pdf-ends-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("blank.pdf");
+        {
+            let surface = cairo::PdfSurface::new(300.0, 200.0, &src).unwrap();
+            let cr = cairo::Context::new(&surface).unwrap();
+            cr.show_page().unwrap();
+            drop(cr);
+            surface.finish();
+        }
+        let pdf = Pdf::open(&gio::File::for_path(&src)).unwrap();
+        let style = |stroke, start, end| Style { stroke, width: 10.0, line: LineStyle::Dashed, start, end, ..Style::default() };
+        let blue = Rgba::new(0.0, 0.0, 1.0, 1.0);
+        let mut line = Shape::new(Kind::Line, (100.0, 100.0), style(blue, LineEnd::Dot, LineEnd::Stealth));
+        line.b = (500.0, 100.0);
+        let mut arrow = Shape::new(Kind::Arrow, (100.0, 300.0), style(Rgba { a: 0.5, ..blue }, LineEnd::None, LineEnd::Arrow));
+        arrow.b = (500.0, 300.0);
+        let docs = vec![Document { shapes: vec![line, arrow], crop: None, image: None }];
+        let out = dir.join("ends.pdf");
+        pdf.save_marked(&[0], &docs, &out).unwrap();
+
+        let back = Pdf::open(&gio::File::for_path(&out)).unwrap();
+        assert!(back.0.page(0).unwrap().image_mapping().is_empty(), "no raster images");
+        let (tex, _) = back.render(0).unwrap();
+        let mut dl = gdk::TextureDownloader::new(&tex);
+        dl.set_format(gdk::MemoryFormat::R8g8b8a8);
+        let (bytes, stride) = dl.download_bytes();
+        let px = |x: usize, y: usize| bytes[y * stride + x * 4..][..3].to_vec();
+        // The dot (radius 13) is centred on the start, wider than the line.
+        assert!(px(100, 110)[0] < 60, "dot drawn: {:?}", px(100, 110));
+        // The swept head spreads across the line near the tip.
+        assert!(px(480, 108)[0] < 60, "head drawn: {:?}", px(480, 108));
+        assert_eq!(px(510, 100), [255, 255, 255], "nothing past the tip");
+        // The translucent head is evenly light blue where the line runs in.
+        let (head, inside) = (px(480, 300), px(470, 300));
+        assert!((100..160).contains(&head[0]), "translucent head: {head:?}");
+        assert_eq!(head, inside);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
 
 /// A stress test for the lock in [`Pdf::open`]: many threads open and render

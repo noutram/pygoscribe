@@ -269,7 +269,8 @@ single-letter shortcuts work while the canvas has focus.
 
 - Every mark stays editable. With Select you can click a mark to move it, drag
   its handles to resize it, or press Delete to remove it. Changing the colour,
-  fill, width, line style, text font or text size applies to the selected mark.
+  fill, width, line style, line ends, text font or text size applies to the
+  selected mark.
 - Edit a text mark by double-clicking it, by clicking it a second time with
   the Text tool, or by selecting it and pressing Enter or F2. In the editor,
   Enter finishes, Shift+Enter starts a new line, and Esc puts back the old
@@ -284,24 +285,37 @@ single-letter shortcuts work while the canvas has focus.
   and the right-click menu has a Text Alignment submenu (for a text mark it
   lines up its lines left, centre or right). Text uses the border colour,
   font and text size, and turns with a rotated shape.
-- Text font: the font button next to the text size (it shows the font's
-  name in that font) opens GTK's font chooser, where you can pick any
+- Text font and size: the "Aa 28" button at the end of the tool bar (drawn
+  in the current font, with the current size) opens Font and Size. The
+  font button there opens GTK's font chooser, where you can pick any
   installed font and style, such as Bold or Italic. It applies to new text
   and to the selected text mark.
-- Border and fill: each colour has an opacity control beside it (the
-  percentage button), with a slider and 100/75/50/25 % presets, so fills and
-  lines can be see-through. The Border toggle turns the outline of
-  rectangles, ovals and speech bubbles off, for a filled box with no edge;
-  lines, arrows, drawing and text always keep their colour. A shape keeps at
-  least one of border and fill, so turning one off turns the other on. A
-  speech bubble with fill off is see-through. The highlighter's opacity
-  scales with the colour's.
-- Line style: the drop-down after Width picks Solid, Dashed, Dotted, Dash
-  Dot, Dash Dot Dot or Long Dash for drawing, lines, arrows and the borders
-  of rectangles, ovals and speech bubbles. Dashes and dots scale with the
-  line width, and an arrow's head stays solid. Highlighter strokes, the
-  loupe's rim and text are always solid. Dashes are kept in PNG, JPEG and
-  PDF output (as real dashed vector lines in a PDF).
+- Border and fill: the Colours button (a small box drawn in the current
+  border and fill) opens Border and Fill, each with an on/off toggle, a
+  colour button and an opacity slider beside it, with 100/75/50/25 %
+  presets under it, so fills and lines can be
+  see-through. The Border toggle turns the outline of rectangles, ovals and
+  speech bubbles off, for a filled box with no edge; lines, arrows, drawing
+  and text always keep their colour. A shape keeps at least one of border
+  and fill, so turning one off turns the other on. A speech bubble with fill
+  off is see-through. The highlighter's opacity scales with the colour's.
+- Line: the button after Colours shows a sample of the current line and
+  opens Width, plus rows of buttons for Style, Start and End (hover one to
+  see its name).
+- Line style: Style picks Solid, Dashed, Dotted, Dash Dot, Dash Dot Dot or
+  Long Dash for drawing, lines, arrows and the borders of rectangles, ovals
+  and speech bubbles. Dashes and dots scale with the line width, and an
+  arrow's head stays solid. Highlighter strokes, the loupe's rim and text
+  are always solid. Dashes are kept in PNG, JPEG and PDF output (as real
+  dashed vector lines in a PDF).
+- Line ends: Start and End in the Line pop-up put an end on either end of a
+  drawing, line or arrow: None, Arrow, Open Arrow, Swept Arrow, Dot, Circle,
+  Square, Diamond or Bar. Ends grow with the line width and stay solid on a
+  dashed line. Draw, Line and Arrow each remember their own ends, so the
+  Arrow tool starts with a head at the end and the Line tool with none;
+  choose an arrowhead at both ends for a double-headed arrow. On a drawing,
+  the end follows the direction the stroke was going. Ends are kept in PNG,
+  JPEG and PDF output (as vector shapes in a PDF).
 - Rotate a mark by holding Alt and dragging it (or dragging anywhere while it
   is selected). Hold Shift as well to snap to 15° steps. Every mark except the
   loupe can be rotated. If GNOME is set to move windows with Alt+drag (it uses
@@ -420,7 +434,8 @@ clipboard for you to paste in.
 ## Remembered settings
 
 Pygoscribe remembers, between uses: the border and fill colours and their
-opacity, whether border and fill are on, the line width and line style, the text font and size, the last folder you opened an image from,
+opacity, whether border and fill are on, the line width and line style, the line ends of drawings, lines and arrows (each
+remembered separately), the text font and size, the last folder you opened an image from,
 the last folder you saved to, and the last save format. Changing a control
 with a mark selected restyles that mark and also becomes the new default;
 just selecting a mark doesn't change the defaults.

@@ -19,7 +19,7 @@
 //! sandbox permissions or installed GSettings schema are needed. A missing or
 //! unreadable file, or a bad value, falls back to the defaults.
 
-use crate::document::{LineStyle, Rgba, Style};
+use crate::document::{EndsFor, LineEnd, LineStyle, Rgba, Style};
 use gtk::{gio, glib};
 use gtk::prelude::*;
 use std::cell::RefCell;
@@ -108,6 +108,12 @@ pub struct Settings {
     pub font: String,
     /// Dash pattern of lines and borders.
     pub line: LineStyle,
+    /// (start, end) of freehand strokes.
+    pub pen_ends: (LineEnd, LineEnd),
+    /// (start, end) of lines.
+    pub line_ends: (LineEnd, LineEnd),
+    /// (start, end) of arrows.
+    pub arrow_ends: (LineEnd, LineEnd),
     /// Where the Open dialog starts.
     pub open_folder: Option<PathBuf>,
     /// Where the Save dialogs start.
@@ -139,6 +145,9 @@ impl Default for Settings {
             font_size: style.font_size,
             font: style.font,
             line: style.line,
+            pen_ends: EndsFor::Pen.default_ends(),
+            line_ends: EndsFor::Line.default_ends(),
+            arrow_ends: EndsFor::Arrow.default_ends(),
             open_folder: None,
             save_folder: None,
             save_format: SaveFormat::Png,
@@ -148,6 +157,24 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// The remembered (start, end) pair for one kind of mark.
+    pub fn ends(&self, kind: EndsFor) -> (LineEnd, LineEnd) {
+        match kind {
+            EndsFor::Pen => self.pen_ends,
+            EndsFor::Line => self.line_ends,
+            EndsFor::Arrow => self.arrow_ends,
+        }
+    }
+
+    /// Mutable access to the pair for one kind of mark.
+    pub fn ends_mut(&mut self, kind: EndsFor) -> &mut (LineEnd, LineEnd) {
+        match kind {
+            EndsFor::Pen => &mut self.pen_ends,
+            EndsFor::Line => &mut self.line_ends,
+            EndsFor::Arrow => &mut self.arrow_ends,
+        }
+    }
+
     /// Reads the key file at `path`. Each value is checked on its own, so
     /// one bad entry only resets that entry to its default.
     pub fn load_from(path: &Path) -> Self {
@@ -188,6 +215,15 @@ impl Settings {
         if let Some(l) = kf.string(STYLE, "line").ok().and_then(|l| LineStyle::from_id(&l)) {
             s.line = l;
         }
+        for kind in ENDS_KEYS {
+            for (i, which) in ["start", "end"].into_iter().enumerate() {
+                let key = format!("{}-{which}", ends_key(kind));
+                if let Some(e) = kf.string(STYLE, &key).ok().and_then(|e| LineEnd::from_id(&e)) {
+                    let pair = s.ends_mut(kind);
+                    if i == 0 { pair.0 = e } else { pair.1 = e }
+                }
+            }
+        }
         s.open_folder = read_folder(&kf, "open");
         s.save_folder = read_folder(&kf, "save");
         s.save_format = match kf.string(SAVE, "format").ok().as_deref() {
@@ -215,6 +251,11 @@ impl Settings {
         kf.set_double(STYLE, "font-size", self.font_size);
         kf.set_string(STYLE, "font", &self.font);
         kf.set_string(STYLE, "line", self.line.id());
+        for kind in ENDS_KEYS {
+            let (start, end) = self.ends(kind);
+            kf.set_string(STYLE, &format!("{}-start", ends_key(kind)), start.id());
+            kf.set_string(STYLE, &format!("{}-end", ends_key(kind)), end.id());
+        }
         for (key, dir) in [("open", &self.open_folder), ("save", &self.save_folder)] {
             if let Some(dir) = dir {
                 kf.set_string(FOLDERS, key, &dir.to_string_lossy());
@@ -227,6 +268,18 @@ impl Settings {
                 .map_err(|e| glib::Error::new(gio::IOErrorEnum::Failed, &e.to_string()))?;
         }
         kf.save_to_file(path)
+    }
+}
+
+/// The kinds of mark whose line ends are remembered.
+const ENDS_KEYS: [EndsFor; 3] = [EndsFor::Pen, EndsFor::Line, EndsFor::Arrow];
+
+/// The settings-key prefix for one kind's ends ("arrow-start", "arrow-end").
+fn ends_key(kind: EndsFor) -> &'static str {
+    match kind {
+        EndsFor::Pen => "pen",
+        EndsFor::Line => "line",
+        EndsFor::Arrow => "arrow",
     }
 }
 
@@ -375,6 +428,9 @@ mod tests {
             font_size: 42.0,
             font: "DejaVu Serif Bold Italic".into(),
             line: LineStyle::DashDot,
+            pen_ends: (LineEnd::Dot, LineEnd::None),
+            line_ends: (LineEnd::Bar, LineEnd::Bar),
+            arrow_ends: (LineEnd::Stealth, LineEnd::OpenArrow),
             open_folder: Some(dir.clone()),
             save_folder: Some(dir.clone()),
             save_format: SaveFormat::Jpeg,
@@ -391,7 +447,7 @@ mod tests {
         let path = dir.join("settings.ini");
         std::fs::write(
             &path,
-            "[style]\nstroke=1;2;3\nfill=0.1;0.2;0.3;9\nwidth=1000\nfont-size=nan\nfont=  \nline=wavy\n\
+            "[style]\nstroke=1;2;3\nfill=0.1;0.2;0.3;9\nwidth=1000\nfont-size=nan\nfont=  \nline=wavy\narrow-end=spiral\nline-start=\n\
              [folders]\nopen=/does/not/exist\nsave=relative/path\n[save]\nformat=gif\n",
         )
         .unwrap();
@@ -403,6 +459,8 @@ mod tests {
         assert_eq!(s.font_size, d.font_size);
         assert_eq!(s.font, d.font);
         assert_eq!(s.line, d.line);
+        assert_eq!(s.arrow_ends, d.arrow_ends);
+        assert_eq!(s.line_ends, d.line_ends);
         assert_eq!(s.open_folder, None);
         assert_eq!(s.save_folder, None);
         assert_eq!(s.save_format, SaveFormat::Png);

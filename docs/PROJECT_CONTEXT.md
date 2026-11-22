@@ -50,8 +50,7 @@ All four planned steps are done.
 | 0.1.21 | Drag images and PDFs (or image data) onto a window to open them | Released 20 Nov (`v0.1.21`) |
 | 0.1.22 | Select several pages in the sidebar (Ctrl/Shift+click, Ctrl+A) and delete them together, with one Undo | Released 20 Nov (`v0.1.22`) |
 | 0.1.23 | Line style (solid, dashed, dotted, dash dot, dash dot dot, long dash) for drawing, lines, arrows and shape borders | Released 20 Nov (`v0.1.23`) |
-| 0.1.24 | Line ends (arrow, open arrow, swept arrow, dot, circle, square, diamond, bar) at either end of drawings, lines and arrows | Merged to `master`, not yet released |
-| 0.1.24 | Shift snaps lines and arrows to 15° while drawing or dragging an end; Shift+Alt rotation snaps a line's direction | On branch `feature/angle-snap`, not yet released |
+| 0.1.24 | Line ends (arrow, open arrow, swept arrow, dot, circle, square, diamond, bar) at either end of drawings, lines and arrows; grouped toolbar; Shift snaps lines and arrows to 15° while drawing, dragging an end or rotating | Released 22 Nov (`v0.1.24`) |
 
 ## Architecture
 

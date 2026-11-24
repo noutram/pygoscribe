@@ -327,11 +327,45 @@ single-letter shortcuts work while the canvas has focus.
 - Crop: drag the area to keep, then press Enter or double-click. Esc cancels.
   Crops are non-destructive and can be undone.
 - Undo: Ctrl+Z. Redo: Ctrl+Shift+Z or Ctrl+Y.
+- Select several marks: with Select, Shift+click (or Ctrl+click) marks to
+  add them to the selection or take them out, or drag a box on an empty
+  part of the page to select every mark wholly inside it (hold Shift to add
+  to what is already selected). **Ctrl+A** selects every mark on the page
+  (and switches to Select). Dragging any selected mark moves them all.
+  Delete, cut, copy, paste, duplicate, Bring to Front and Send to Back act
+  on all of them, each as one undo step. Changing a colour, width, line
+  style, line ends or font changes just that on every selected mark, so
+  each keeps the rest of its own style. Handles, text editing and rotating
+  work on one mark at a time; Esc clears the selection.
+- Cut, copy, paste and duplicate marks: select one or more marks, then **Ctrl+X**
+  (cut), **Ctrl+C** (copy), **Ctrl+V** (paste) or **Ctrl+D** (duplicate).
+  This works for every kind of mark, with its text, style and rotation;
+  several marks keep their layout. A paste lands a little down and right of
+  the original, and each further
+  paste one step further on, so copies never hide on top of each other; the
+  first paste after a cut lands where the mark was. Duplicate does the same
+  without touching the clipboard, and repeating it makes a row of copies.
+  Paste from the right-click menu puts the mark where you clicked. Marks can
+  be pasted onto another page or into another window; one that would land
+  out of sight is put in the middle of the view. Each cut, paste and
+  duplicate is one undo step, and the pasted marks are selected.
+- **Marks and the image share the clipboard.** Ctrl+C copies the selected
+  marks, or the whole image when nothing is selected (press Esc to clear the
+  selection). **Copy Image** (the blue Copy button, **Ctrl+Shift+C**, or the
+  image's right-click menu) always copies the whole image. A copied mark also
+  reaches other apps, as a picture of just the marks on a transparent
+  background. Ctrl+V pastes marks only while they are still the last thing
+  copied: once anything else has been copied, here or in another app, it
+  doesn't. In an empty window Ctrl+V marks up the image on the clipboard
+  instead. While you are typing text, the shortcuts cut, copy and paste
+  text as usual.
 - **Right-click** (or long-press on a touch screen, Shift+F10 or the Menu
-  key) opens a context menu. On a mark it selects the mark and offers Edit
+  key) opens a context menu. On a mark it selects the mark (or keeps the
+  selection, if the mark is one of several selected) and offers Edit
   Text or Add Text and Text Alignment (text marks, shapes, lines and arrows),
-  Bring to Front (Ctrl+Shift+Up), Send to Back
-  (Ctrl+Shift+Down) and Delete. Elsewhere on the image it offers Copy, Mark
+  Cut, Copy, Paste and Duplicate, Bring to Front (Ctrl+Shift+Up), Send to
+  Back (Ctrl+Shift+Down) and Delete. Elsewhere on the image it offers
+  Paste (copied marks, at the click), Select All Marks, Copy Image, Mark
   Up Clipboard, Save (Replace Original)…, Save As…, Scale Image to Visible
   Size, Actual Size and Zoom to Fit.
 
@@ -405,8 +439,9 @@ that. Password-protected PDFs can't be opened.
 
 ## Getting the result out
 
-- **Copy** (Ctrl+C), the blue button, puts the full-resolution result on the
-  clipboard, ready to paste into chat, email or documents.
+- **Copy** (Ctrl+Shift+C, or Ctrl+C with no mark selected), the blue
+  button, puts the full-resolution result on the clipboard, ready to paste
+  into chat, email or documents.
 - **Save (Replace Original)…**, the plain save button left of Save As, writes the
   result over the file you opened, in that file's own format (PNG, JPEG,
   TIFF, BMP, WebP… or the whole PDF). It asks first, because the original

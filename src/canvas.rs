@@ -65,6 +65,9 @@ const HANDLE: f64 = 5.0;
 const HIT_TOL: f64 = 6.0;
 /// How far an arrow key scrolls a zoomed-in page, in screen pixels.
 const ARROW_STEP: f64 = 40.0;
+/// How far (screen pixels, down and right) each paste or duplicate is
+/// moved from the marks it copies, so it doesn't hide exactly on top.
+const PASTE_STEP: f64 = 20.0;
 /// Sharp PDF rendering is skipped past this many device pixels a side.
 const HIRES_MAX: i32 = 8192;
 /// The largest side Scale Image to Visible Size will make, in pixels.
@@ -95,8 +98,13 @@ enum Drag {
     /// Drawing new mark `idx` (already pushed onto the document), from
     /// `start` in image pixels.
     Create { idx: usize, start: Point, before: Document },
-    /// Moving mark `idx`; `start` is where the pointer went down.
-    Move { idx: usize, orig: Shape, start: Point, before: Document },
+    /// Moving the selected marks, each (index, as it was); `start` is where
+    /// the pointer went down.
+    Move { group: Vec<(usize, Shape)>, start: Point, before: Document },
+    /// Dragging out a marquee from `start` with Select: the marks inside it
+    /// are selected, along with `base` (those selected before, when Shift
+    /// or Ctrl was held).
+    Marquee { start: Point, base: Vec<usize> },
     /// Dragging handle `handle` of mark `idx` (see `Shape::handles`).
     Resize { idx: usize, handle: usize, orig: Shape, before: Document },
     /// Alt+drag: turn the mark about `center` by the pointer's change of
@@ -126,8 +134,16 @@ struct State {
     tool: Tool,
     /// The style for new marks.
     style: Style,
-    /// Index of the selected mark in `doc.shapes`.
+    /// Index of the selected mark in `doc.shapes`: with several selected,
+    /// the main one, whose style the tool bar shows and whose handles are
+    /// drawn (handles only when it is the only one).
     selected: Option<usize>,
+    /// The other selected marks (Shift/Ctrl+click, a marquee, Ctrl+A),
+    /// never including `selected`, and empty when `selected` is None. Set
+    /// through [`select_one`] and [`select_many`], which keep it so.
+    also: Vec<usize>,
+    /// The marquee being dragged out with Select, in image pixels.
+    marquee: Option<Rect>,
     /// The last restyle of a selected mark: (mark, when, undo depth after it).
     /// Quick successive restyles of one mark (dragging the opacity slider)
     /// make one undo step.
@@ -159,6 +175,9 @@ struct State {
     last_press: Option<(Instant, Point)>,
     /// Pinch zoom: the scale when the pinch began.
     pinch_start: f64,
+    /// Where the last context menu was asked for, in image pixels: its
+    /// Paste puts the marks there.
+    menu_point: Option<Point>,
     /// Draws the page as vectors (PDFs), for sharp zoomed-in views.
     painter: Option<render::Painter>,
     /// The part of a PDF page in view, rendered at the current zoom.
@@ -189,6 +208,8 @@ struct Editor {
     before: Document,
     /// The popover holding the text view and alignment buttons.
     popover: gtk::Popover,
+    /// Where the text is typed; cut, copy and paste go to it while open.
+    view: gtk::TextView,
 }
 
 /// The canvas's widgets, state and callbacks to the window.
@@ -230,6 +251,8 @@ struct Inner {
 /// The mark a context menu is for.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MarkInfo {
+    /// How many marks are selected (the menu acts on all of them).
+    pub count: usize,
     /// A Text mark (rather than a shape that can hold text).
     pub is_text: bool,
     /// Whether it can hold text: a Text mark, rectangle, oval, bubble,
@@ -290,6 +313,8 @@ impl Canvas {
                 tool: Tool::Select,
                 style: Style::default(),
                 selected: None,
+                also: Vec::new(),
+                marquee: None,
                 restyle: None,
                 drag: Drag::None,
                 pending_crop: None,
@@ -303,6 +328,7 @@ impl Canvas {
                 space: false,
                 last_press: None,
                 pinch_start: 1.0,
+                menu_point: None,
                 painter: None,
                 hires: None,
             }),
@@ -363,15 +389,21 @@ impl Canvas {
         let st = self.0.state.borrow();
         let i = st.selected?;
         let shape = st.doc.shapes.get(i)?;
+        let sel = selection(&st);
+        let (n, len) = (sel.len(), st.doc.shapes.len());
+        // Text commands apply to one mark at a time.
+        let one = n == 1;
         Some(MarkInfo {
-            is_text: matches!(shape.kind, Kind::Text(_)),
-            holds_text: shape.holds_text(),
-            has_text: !shape.text().is_empty(),
+            count: n,
+            is_text: one && matches!(shape.kind, Kind::Text(_)),
+            holds_text: one && shape.holds_text(),
+            has_text: one && !shape.text().is_empty(),
             is_line: shape.is_segment(),
             halign: shape.halign,
             valign: shape.valign,
-            can_raise: i + 1 < st.doc.shapes.len(),
-            can_lower: i > 0,
+            // Already the top (bottom) marks, in a block: nothing to move.
+            can_raise: sel.iter().copied().ne(len - n..len),
+            can_lower: sel.iter().copied().ne(0..n),
         })
     }
 
@@ -381,10 +413,13 @@ impl Canvas {
         self.finish_edit(false);
         {
             let mut st = self.st();
-            let Some(i) = st.selected else { return };
+            let sel = selection(&st);
+            if sel.is_empty() {
+                return;
+            }
             let before = st.doc.clone();
-            let j = st.doc.restack(i, front);
-            st.selected = Some(j);
+            let moved = st.doc.restack_many(&sel, front);
+            select_many(&mut st, moved);
             // Split the borrow: record needs `history` mutably and `doc`
             // immutably at the same time.
             let State { history, doc, .. } = &mut *st;
@@ -433,7 +468,10 @@ impl Canvas {
                 Some(p) => {
                     // Right-clicking a mark selects it; elsewhere, the image.
                     let ip = ((p.0 - st.offset.0) / st.scale, (p.1 - st.offset.1) / st.scale);
-                    st.selected = shape_at(&st, ip);
+                    let hit = shape_at(&st, ip);
+                    if hit.is_none_or(|i| !selection(&st).contains(&i)) {
+                        select_one(&mut st, hit);
+                    }
                     p
                 }
                 None => match st.selected.and_then(|i| st.doc.shapes.get(i)) {
@@ -445,6 +483,10 @@ impl Canvas {
                 },
             }
         };
+        {
+            let mut st = self.st();
+            st.menu_point = Some(((pos.0 - st.offset.0) / st.scale, (pos.1 - st.offset.1) / st.scale));
+        }
         self.emit_selection();
         self.redraw();
         let mark = self.selected_mark();
@@ -500,7 +542,7 @@ impl Canvas {
         let old = {
             let mut st = self.st();
             st.image = Some(image);
-            st.selected = None;
+            select_one(&mut st, None);
             st.pending_crop = None;
             st.restyle = None;
             st.drag = Drag::None;
@@ -539,7 +581,7 @@ impl Canvas {
             let mut st = self.st();
             st.tool = tool;
             if tool != Tool::Select {
-                st.selected = None;
+                select_one(&mut st, None);
             }
             st.pending_crop.is_some() && tool != Tool::Crop
         };
@@ -583,6 +625,14 @@ impl Canvas {
             let before = st.doc.clone();
             // fit_text: a new font or size changes a text box's size.
             if let Some(i) = st.selected {
+                // The others take only what changed, keeping the rest of
+                // their own style.
+                let old = st.doc.shapes[i].style.clone();
+                for j in st.also.clone() {
+                    let shape = &mut st.doc.shapes[j];
+                    shape.restyle_from(&old, &style);
+                    render::fit_text(shape);
+                }
                 let shape = &mut st.doc.shapes[i];
                 shape.style = style;
                 render::fit_text(shape);
@@ -629,7 +679,7 @@ impl Canvas {
             let width = image_width(&st);
             let State { history, doc, .. } = &mut *st;
             let ok = history.undo(doc);
-            st.selected = None;
+            select_one(&mut st, None);
             st.pending_crop = None;
             keep_shown_size(&mut st, width);
             ok
@@ -649,7 +699,7 @@ impl Canvas {
             let width = image_width(&st);
             let State { history, doc, .. } = &mut *st;
             let ok = history.redo(doc);
-            st.selected = None;
+            select_one(&mut st, None);
             keep_shown_size(&mut st, width);
             ok
         };
@@ -670,13 +720,142 @@ impl Canvas {
         self.0.state.borrow().history.can_redo()
     }
 
-    /// Removes the selected mark, as one undo step.
+    /// Removes the selected marks, as one undo step.
     pub fn delete_selected(&self) {
         {
             let mut st = self.st();
-            let Some(i) = st.selected.take() else { return };
+            let sel = selection(&st);
+            if sel.is_empty() {
+                return;
+            }
+            select_one(&mut st, None);
             let before = st.doc.clone();
-            st.doc.shapes.remove(i);
+            for &i in sel.iter().rev() {
+                st.doc.shapes.remove(i);
+            }
+            let State { history, doc, .. } = &mut *st;
+            history.record(before, doc);
+        }
+        self.emit_selection();
+        self.emit_history();
+        self.redraw();
+    }
+
+    // ----- cut, copy, paste and duplicate (see `clip`) ----------------------
+
+    /// While the text editor is open, cut, copy and paste act on its text:
+    /// runs `clipboard.<op>` on it and returns true. False if it is closed.
+    fn editor_clipboard(&self, op: &str) -> bool {
+        let Some(view) = self.0.editor.borrow().as_ref().map(|e| e.view.clone()) else { return false };
+        let _ = view.activate_action(&format!("clipboard.{op}"), None);
+        true
+    }
+
+    /// Copies the selected marks to the clipboard (see `clip`), and with
+    /// `cut` removes them as one undo step. Returns false, doing nothing, if
+    /// no mark is selected (the window then copies the whole image). While
+    /// text is being edited this cuts or copies the text instead.
+    pub fn copy_selected(&self, cut: bool) -> bool {
+        if self.editor_clipboard(if cut { "cut" } else { "copy" }) {
+            return true;
+        }
+        let (shapes, image) = {
+            let st = self.0.state.borrow();
+            let shapes: Vec<Shape> = selection(&st).into_iter().map(|i| st.doc.shapes[i].clone()).collect();
+            if shapes.is_empty() {
+                return false;
+            }
+            (shapes, current_image(&st).cloned())
+        };
+        let picture = image.and_then(|img| match render::render_marks(&img, &shapes) {
+            Ok(p) => p,
+            Err(e) => {
+                glib::g_warning!("pygoscribe", "could not draw the copied marks: {e}");
+                None
+            }
+        });
+        if let Err(e) = crate::clip::put(&self.0.area.clipboard(), shapes, picture, cut) {
+            self.hint(&format!("Could not copy: {e}"));
+            return true;
+        }
+        if cut {
+            self.delete_selected();
+        }
+        true
+    }
+
+    /// Selects every mark on the page (Ctrl+A; the window switches to the
+    /// Select tool first, so they can be moved together).
+    pub fn select_all(&self) {
+        self.finish_edit(false);
+        {
+            let mut st = self.st();
+            let all = (0..st.doc.shapes.len()).collect();
+            select_many(&mut st, all);
+        }
+        self.emit_selection();
+        self.redraw();
+    }
+
+    /// Whether the clipboard holds marks copied here, ready to paste.
+    pub fn can_paste(&self) -> bool {
+        crate::clip::has_marks(&self.0.area.clipboard())
+    }
+
+    /// Pastes the copied marks as one undo step and selects them. Each
+    /// paste lands a step further down and right of the copied marks (the
+    /// first paste after Cut lands where they were), or in the middle of the
+    /// view if that would be out of sight; with `at_menu`, centred where the
+    /// context menu was opened. Returns false, doing nothing, if the
+    /// clipboard holds no marks. While text is being edited this pastes
+    /// text into it instead.
+    pub fn paste(&self, at_menu: bool) -> bool {
+        if self.editor_clipboard("paste") {
+            return true;
+        }
+        if self.0.state.borrow().image.is_none() {
+            return false;
+        }
+        let Some((shapes, n)) = crate::clip::take(&self.0.area.clipboard()) else { return false };
+        let placement = {
+            let st = self.0.state.borrow();
+            match st.menu_point.filter(|_| at_menu) {
+                Some(p) => document::Placement::At(p),
+                None => document::Placement::Offset { by: f64::from(n) * PASTE_STEP / st.scale, view: shown_rect(&st) },
+            }
+        };
+        self.add_marks(document::place(&shapes, placement));
+        true
+    }
+
+    /// Adds copies of the selected marks a step down and right of them, as
+    /// one undo step, and selects the copies (so repeating it makes a row).
+    /// Does nothing while text is being edited.
+    pub fn duplicate_selected(&self) {
+        if self.0.editor.borrow().is_some() {
+            return;
+        }
+        let copies = {
+            let st = self.0.state.borrow();
+            let shapes: Vec<Shape> = selection(&st).into_iter().map(|i| st.doc.shapes[i].clone()).collect();
+            if shapes.is_empty() {
+                return;
+            }
+            let placement = document::Placement::Offset { by: PASTE_STEP / st.scale, view: shown_rect(&st) };
+            document::place(&shapes, placement)
+        };
+        self.add_marks(copies);
+    }
+
+    /// Puts `shapes` on top of the page as one undo step and selects them.
+    fn add_marks(&self, shapes: Vec<Shape>) {
+        self.finish_edit(false);
+        {
+            let mut st = self.st();
+            let before = st.doc.clone();
+            let n = shapes.len();
+            let Some(top) = st.doc.add_on_top(shapes) else { return };
+            select_many(&mut st, (top + 1 - n..=top).collect());
             let State { history, doc, .. } = &mut *st;
             history.record(before, doc);
         }
@@ -756,7 +935,7 @@ impl Canvas {
             st.doc.image = Some(crate::document::Picture(out));
             let State { history, doc, .. } = &mut *st;
             history.record(before, doc);
-            st.selected = None;
+            select_one(&mut st, None);
             st.pending_crop = None;
             st.restyle = None;
             st.hires = None;
@@ -1213,8 +1392,14 @@ impl Canvas {
         let _ = cr.save();
         cr.translate(offset.0, offset.1);
         cr.scale(scale, scale);
-        if let Some(sel) = st.selected.and_then(|i| st.doc.shapes.get(i)) {
-            draw_selection(cr, sel, scale);
+        // Handles only for a single selected mark: several are moved, not
+        // resized.
+        let sel = selection(&st);
+        for &i in &sel {
+            draw_selection(cr, &st.doc.shapes[i], scale, sel.len() == 1);
+        }
+        if let Some(r) = st.marquee {
+            draw_marquee(cr, &r, scale);
         }
         if let Some(crop) = st.pending_crop {
             draw_crop_overlay(cr, &vis, &crop, scale);
@@ -1352,7 +1537,7 @@ impl Canvas {
                     {
                         let mut st = c.st();
                         st.pending_crop = None;
-                        st.selected = None;
+                        select_one(&mut st, None);
                     }
                     c.emit_selection();
                     c.redraw();
@@ -1481,7 +1666,7 @@ impl Canvas {
             && !rotate_modifier(mods)
             && let Some(idx) = shape_at(&st, p).filter(|&i| st.doc.shapes[i].holds_text())
         {
-            st.selected = Some(idx);
+            select_one(&mut st, Some(idx));
             st.drag = Drag::EditText { idx, before };
             drop(st);
             self.emit_selection();
@@ -1495,7 +1680,7 @@ impl Canvas {
         {
             let orig = st.doc.shapes[idx].clone();
             let center = orig.center();
-            st.selected = Some(idx);
+            select_one(&mut st, Some(idx));
             st.drag = Drag::Rotate { idx, orig, center, start: p, before };
             drop(st);
             self.0.area.set_cursor_from_name(Some("grabbing"));
@@ -1514,10 +1699,38 @@ impl Canvas {
         let tool = st.tool;
         match tool {
             Tool::Select => {
-                st.selected = shape_at(&st, p);
-                st.drag = match st.selected {
-                    Some(idx) => Drag::Move { idx, orig: st.doc.shapes[idx].clone(), start: p, before },
-                    None => Drag::None,
+                let hit = shape_at(&st, p);
+                let sel = selection(&st);
+                let adding = mods.intersects(gdk::ModifierType::SHIFT_MASK | gdk::ModifierType::CONTROL_MASK);
+                st.drag = match hit {
+                    // Shift or Ctrl+click adds a mark to the selection, or
+                    // takes it out.
+                    Some(idx) if adding => {
+                        let mut sel = sel;
+                        match sel.iter().position(|&i| i == idx) {
+                            Some(k) => {
+                                sel.remove(k);
+                            }
+                            None => sel.push(idx),
+                        }
+                        select_many(&mut st, sel);
+                        Drag::None
+                    }
+                    Some(idx) => {
+                        // Dragging one of several selected marks moves them
+                        // all; any other mark is selected alone.
+                        if !sel.contains(&idx) {
+                            select_one(&mut st, Some(idx));
+                        }
+                        let group = selection(&st).into_iter().map(|i| (i, st.doc.shapes[i].clone())).collect();
+                        Drag::Move { group, start: p, before }
+                    }
+                    // On the page itself: drag out a marquee.
+                    None => {
+                        let base = if adding { sel } else { Vec::new() };
+                        select_many(&mut st, base.clone());
+                        Drag::Marquee { start: p, base }
+                    }
                 };
                 drop(st);
                 self.emit_selection();
@@ -1537,8 +1750,8 @@ impl Canvas {
                     if st.selected == Some(idx) {
                         st.drag = Drag::EditText { idx, before };
                     } else {
-                        st.selected = Some(idx);
-                        st.drag = Drag::Move { idx, orig: st.doc.shapes[idx].clone(), start: p, before };
+                        select_one(&mut st, Some(idx));
+                        st.drag = Drag::Move { group: vec![(idx, st.doc.shapes[idx].clone())], start: p, before };
                         drop(st);
                         self.emit_selection();
                         self.redraw();
@@ -1551,7 +1764,7 @@ impl Canvas {
                 render::fit_text(&mut shape);
                 st.doc.shapes.push(shape);
                 let idx = st.doc.shapes.len() - 1;
-                st.selected = Some(idx);
+                select_one(&mut st, Some(idx));
                 st.drag = Drag::EditText { idx, before };
                 drop(st);
                 self.redraw();
@@ -1577,7 +1790,7 @@ impl Canvas {
                 }
                 st.doc.shapes.push(Shape::new(kind, p, style));
                 let idx = st.doc.shapes.len() - 1;
-                st.selected = None;
+                select_one(&mut st, None);
                 st.drag = Drag::Create { idx, start: p, before };
             }
         }
@@ -1597,9 +1810,19 @@ impl Canvas {
         }
         // Split the borrow so the drag, the document and the crop can be
         // changed together.
+        if let Drag::Marquee { start, base } = &st.drag {
+            let r = Rect::from_points(*start, p);
+            let mut sel = base.clone();
+            sel.extend(st.doc.marks_within(&r));
+            st.marquee = Some(r);
+            select_many(&mut st, sel);
+            drop(st);
+            self.redraw();
+            return;
+        }
         let State { drag, doc, pending_crop, .. } = &mut *st;
         match drag {
-            Drag::None | Drag::EditText { .. } | Drag::Pan { .. } => return,
+            Drag::None | Drag::EditText { .. } | Drag::Pan { .. } | Drag::Marquee { .. } => return,
             Drag::Create { idx, start, .. } => {
                 let shape = &mut doc.shapes[*idx];
                 match &mut shape.kind {
@@ -1616,10 +1839,12 @@ impl Canvas {
                     _ => shape.b = p,
                 }
             }
-            Drag::Move { idx, orig, start, .. } => {
-                let mut s = orig.clone();
-                s.translate(p.0 - start.0, p.1 - start.1);
-                doc.shapes[*idx] = s;
+            Drag::Move { group, start, .. } => {
+                for (idx, orig) in group.iter() {
+                    let mut s = orig.clone();
+                    s.translate(p.0 - start.0, p.1 - start.1);
+                    doc.shapes[*idx] = s;
+                }
             }
             Drag::Resize { idx, handle, orig, .. } => {
                 let (idx, handle) = (*idx, *handle);
@@ -1696,7 +1921,7 @@ impl Canvas {
                 if tiny {
                     st.doc = before;
                 } else {
-                    st.selected = Some(idx);
+                    select_one(&mut st, Some(idx));
                     let State { history, doc, .. } = &mut *st;
                     history.record(before, doc);
                 }
@@ -1710,6 +1935,7 @@ impl Canvas {
                     st.pending_crop = None;
                 }
             }
+            Drag::Marquee { .. } => st.marquee = None,
             Drag::None | Drag::Pan { .. } => {}
             Drag::EditText { idx, before } => {
                 drop(st);
@@ -1738,7 +1964,7 @@ impl Canvas {
     pub fn edit_selected_text(&self) -> bool {
         let (idx, before) = {
             let st = self.0.state.borrow();
-            let Some(idx) = st.selected else { return false };
+            let Some(idx) = st.selected.filter(|_| st.also.is_empty()) else { return false };
             if !st.doc.shapes.get(idx).is_some_and(Shape::holds_text) {
                 return false;
             }
@@ -1757,7 +1983,7 @@ impl Canvas {
         {
             let mut st = self.st();
             if st.doc.finish_text_edit(ed.idx, &ed.original, cancel) {
-                st.selected = None;
+                select_one(&mut st, None);
             } else if let Some(shape) = st.doc.shapes.get_mut(ed.idx) {
                 render::fit_text(shape);
             }
@@ -1889,7 +2115,7 @@ impl Canvas {
             this.finish_edit(false);
         });
 
-        *self.0.editor.borrow_mut() = Some(Editor { idx, original: text, before, popover: popover.clone() });
+        *self.0.editor.borrow_mut() = Some(Editor { idx, original: text, before, popover: popover.clone(), view: view.clone() });
         glib::g_debug!("pygoscribe", "text editor opening for mark {idx} at {rect:?}");
         popover.popup();
         view.grab_focus();
@@ -2052,6 +2278,41 @@ fn visible_rect(st: &State) -> Option<Rect> {
     Some(st.doc.crop.unwrap_or(Rect { x: 0.0, y: 0.0, w: img.width() as f64, h: img.height() as f64 }))
 }
 
+/// Selects mark `i` alone, or nothing.
+fn select_one(st: &mut State, i: Option<usize>) {
+    st.selected = i;
+    st.also.clear();
+}
+
+/// Selects the marks at `indices` (any order, repeats ignored); the
+/// topmost becomes the main one ([`State::selected`]).
+fn select_many(st: &mut State, mut indices: Vec<usize>) {
+    indices.retain(|&i| i < st.doc.shapes.len());
+    indices.sort_unstable();
+    indices.dedup();
+    st.selected = indices.pop();
+    st.also = indices;
+}
+
+/// Every selected mark, bottom to top.
+fn selection(st: &State) -> Vec<usize> {
+    let mut v: Vec<usize> =
+        st.selected.into_iter().chain(st.also.iter().copied()).filter(|&i| i < st.doc.shapes.len()).collect();
+    v.sort_unstable();
+    v.dedup();
+    v
+}
+
+/// The part of the result on screen, in image pixels (the whole result
+/// before the first draw, or if none of it is in view).
+fn shown_rect(st: &State) -> Rect {
+    let vis = visible_rect(st).unwrap_or(Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 });
+    if st.viewport.0 <= 0.0 || st.viewport.1 <= 0.0 {
+        return vis;
+    }
+    view_rect(st).intersect(&vis).unwrap_or(vis)
+}
+
 /// The topmost mark at image point `p` (its body or a line's text), with a
 /// tolerance of [`HIT_TOL`] screen pixels at the current zoom.
 fn shape_at(st: &State, p: Point) -> Option<usize> {
@@ -2082,6 +2343,9 @@ fn outline_bounds(shape: &Shape) -> Rect {
 /// The handle of the selected mark at image point `p`, if any. The grab
 /// area is a little bigger than the drawn handle.
 fn handle_at(st: &State, p: Point) -> Option<usize> {
+    if !st.also.is_empty() {
+        return None; // several selected: no handles
+    }
     let shape = st.doc.shapes.get(st.selected?)?;
     let tol = (HANDLE + 3.0) / st.scale;
     shape.handles().iter().position(|h| (h.0 - p.0).abs() <= tol && (h.1 - p.1).abs() <= tol)
@@ -2090,7 +2354,7 @@ fn handle_at(st: &State, p: Point) -> Option<usize> {
 /// Draws the selection: a dashed outline (rotated with the mark) and square
 /// handles. `cr` is in image pixels; sizes are divided by `scale` so they
 /// stay the same on screen at any zoom.
-fn draw_selection(cr: &Context, shape: &Shape, scale: f64) {
+fn draw_selection(cr: &Context, shape: &Shape, scale: f64, handles: bool) {
     // One screen pixel, in image pixels.
     let px = 1.0 / scale;
     cr.set_source_rgba(ACCENT.r, ACCENT.g, ACCENT.b, 1.0);
@@ -2116,6 +2380,15 @@ fn draw_selection(cr: &Context, shape: &Shape, scale: f64) {
         let _ = cr.stroke();
         cr.set_dash(&[], 0.0);
     }
+    if !handles {
+        if shape.is_segment() {
+            // A line has no box: a thin accent line along it instead.
+            cr.move_to(shape.a.0, shape.a.1);
+            cr.line_to(shape.b.0, shape.b.1);
+            let _ = cr.stroke();
+        }
+        return;
+    }
     for (hx, hy) in shape.handles() {
         let s = HANDLE * px;
         cr.rectangle(hx - s, hy - s, 2.0 * s, 2.0 * s);
@@ -2125,6 +2398,17 @@ fn draw_selection(cr: &Context, shape: &Shape, scale: f64) {
         cr.set_line_width(1.5 * px);
         let _ = cr.stroke();
     }
+}
+
+/// The marquee being dragged out: a faint accent box with a thin edge.
+fn draw_marquee(cr: &Context, r: &Rect, scale: f64) {
+    let px = 1.0 / scale;
+    cr.rectangle(r.x, r.y, r.w, r.h);
+    cr.set_source_rgba(ACCENT.r, ACCENT.g, ACCENT.b, 0.12);
+    let _ = cr.fill_preserve();
+    cr.set_source_rgba(ACCENT.r, ACCENT.g, ACCENT.b, 0.8);
+    cr.set_line_width(px);
+    let _ = cr.stroke();
 }
 
 /// Darkens everything outside the pending crop and outlines the crop.
@@ -2210,7 +2494,7 @@ mod tests {
             let mut mark = Shape::new(Kind::Rect, (40.0, 40.0), Style::default());
             mark.b = (200.0, 120.0);
             st.doc.shapes.push(mark);
-            st.selected = Some(0);
+            select_one(&mut st, Some(0));
         }
         pump(300);
         save_view(&c, &dir.join("1-fit.png"));
@@ -2317,6 +2601,7 @@ mod tests {
             (p.0 * st.scale + st.offset.0, p.1 * st.scale + st.offset.1)
         };
         let rect = MarkInfo {
+            count: 1,
             is_text: false,
             holds_text: true,
             has_text: false,
@@ -2342,6 +2627,136 @@ mod tests {
         c.context_menu(Some(screen((150.0, 150.0))));
         assert_eq!(*got.borrow(), Some(None), "empty spot: the image menu");
         assert_eq!(c.selected_mark(), None);
+    }
+
+    /// Copy, paste, cut and duplicate: each paste a step further on, the
+    /// first paste after Cut in place, each one undo step; copying anything
+    /// else to the clipboard means Paste has no marks.
+    #[test]
+    #[ignore]
+    fn cut_copy_paste_duplicate() {
+        gtk::init().unwrap();
+        let image = ImageSurface::create(cairo::Format::ARgb32, 400, 200).unwrap();
+        let c = Canvas::new();
+        c.swap_page(image, PageState::default());
+        let mut mark = Shape::new(Kind::Rect, (10.0, 10.0), Style::default());
+        mark.b = (60.0, 50.0);
+        c.st().doc.shapes.push(mark.clone());
+        c.zoom_to(2.0, None);
+        let step = PASTE_STEP / 2.0;
+        let at = |i: usize| c.document().shapes[i].a;
+
+        assert!(!c.copy_selected(false), "nothing selected: the window copies the image");
+        c.st().selected = Some(0);
+        assert!(c.copy_selected(false));
+        assert!(c.can_paste());
+        assert!(c.paste(false));
+        assert!(c.paste(false));
+        assert_eq!((at(1), at(2)), ((10.0 + step, 10.0 + step), (10.0 + 2.0 * step, 10.0 + 2.0 * step)));
+        assert_eq!(c.st().selected, Some(2), "the paste is selected");
+        c.undo();
+        assert_eq!(c.document().shapes.len(), 2, "one undo step per paste");
+
+        c.st().selected = Some(1);
+        c.duplicate_selected();
+        assert_eq!(at(2), (10.0 + 2.0 * step, 10.0 + 2.0 * step));
+        assert_eq!(c.st().selected, Some(2));
+
+        assert!(c.copy_selected(true));
+        assert_eq!(c.document().shapes.len(), 2, "cut removes the mark");
+        assert!(c.paste(false));
+        assert_eq!(at(2), (10.0 + 2.0 * step, 10.0 + 2.0 * step), "the first paste after Cut lands in place");
+
+        c.st().menu_point = Some((300.0, 100.0));
+        assert!(c.paste(true));
+        assert_eq!(c.document().shapes[3].center(), (300.0, 100.0));
+
+        c.widget().clipboard().set_text("something else");
+        assert!(!c.can_paste());
+        assert!(!c.paste(false));
+        assert_eq!(c.document().shapes.len(), 4);
+    }
+
+    /// Several marks: Shift+click adds and removes, a marquee takes what
+    /// it covers, dragging one moves them all, and copy, duplicate, restyle,
+    /// restack and delete act on all of them as one undo step each.
+    #[test]
+    #[ignore]
+    fn multi_select() {
+        gtk::init().unwrap();
+        let image = ImageSurface::create(cairo::Format::ARgb32, 400, 200).unwrap();
+        let c = Canvas::new();
+        c.swap_page(image, PageState::default());
+        for x in [10.0, 100.0, 200.0] {
+            let mut mark = Shape::new(Kind::Rect, (x, 10.0), Style::default());
+            mark.b = (x + 50.0, 50.0);
+            c.st().doc.shapes.push(mark);
+        }
+        c.zoom_to(1.0, None);
+        let screen = |p: Point| {
+            let st = c.0.state.borrow();
+            (p.0 * st.scale + st.offset.0, p.1 * st.scale + st.offset.1)
+        };
+        let shift = gdk::ModifierType::SHIFT_MASK;
+        let none = gdk::ModifierType::empty();
+        let click = |p: Point, mods| {
+            let (x, y) = screen(p);
+            c.0.state.borrow_mut().last_press = None;
+            c.drag_begin(x, y, mods);
+            c.drag_end(x, y, mods);
+        };
+        let selected = || selection(&c.0.state.borrow());
+
+        click((20.0, 20.0), none);
+        click((110.0, 20.0), shift);
+        assert_eq!(selected(), vec![0, 1]);
+        click((20.0, 20.0), shift);
+        assert_eq!(selected(), vec![1]);
+
+        // A marquee round the last two.
+        let (x0, y0) = screen((90.0, 0.0));
+        let (x1, y1) = screen((300.0, 100.0));
+        c.drag_begin(x0, y0, none);
+        c.drag_update(x1, y1, none);
+        c.drag_end(x1, y1, none);
+        assert_eq!(selected(), vec![1, 2]);
+        assert_eq!(c.selected_mark().map(|m| m.count), Some(2));
+
+        // Dragging one moves both, as one undo step.
+        let (x0, y0) = screen((110.0, 20.0));
+        let (x1, y1) = screen((120.0, 40.0));
+        c.drag_begin(x0, y0, none);
+        c.drag_end(x1, y1, none);
+        let doc = c.document();
+        assert_eq!((doc.shapes[0].a, doc.shapes[1].a, doc.shapes[2].a), ((10.0, 10.0), (110.0, 30.0), (210.0, 30.0)));
+        c.undo();
+        assert_eq!(c.document().shapes[2].a, (200.0, 10.0));
+
+        // Restyling changes only what changed, on both.
+        c.select_all();
+        assert_eq!(selected(), vec![0, 1, 2]);
+        c.st().doc.shapes[0].style.width = 1.0;
+        let mut style = c.document().shapes[2].style.clone();
+        style.stroke = Rgba::new(0.0, 0.0, 1.0, 1.0);
+        c.set_style(style);
+        let doc = c.document();
+        assert!(doc.shapes.iter().all(|s| s.style.stroke == Rgba::new(0.0, 0.0, 1.0, 1.0)));
+        assert_eq!(doc.shapes[0].style.width, 1.0, "width wasn't changed, so it stays");
+
+        // Duplicate copies all three; Send to Back keeps them together.
+        c.duplicate_selected();
+        assert_eq!(c.document().shapes.len(), 6);
+        assert_eq!(selected(), vec![3, 4, 5]);
+        c.restack_selected(false);
+        assert_eq!(selected(), vec![0, 1, 2]);
+        assert!(c.copy_selected(true));
+        assert_eq!(c.document().shapes.len(), 3, "cut takes all three");
+        assert!(c.paste(false));
+        assert_eq!(selected(), vec![3, 4, 5]);
+        c.delete_selected();
+        assert_eq!(c.document().shapes.len(), 3);
+        c.undo();
+        assert_eq!(c.document().shapes.len(), 6);
     }
 
     /// With Space held, a primary drag moves the view and leaves the marks

@@ -535,6 +535,56 @@ poppler-rs 0.26, cairo-rs 0.22 (feature `pdf`), edition 2024. Flatpak uses GNOME
   row follows it both ways. Opacity is an inline slider with the presets
   under it (`ColourControl::presets`). Only the colour and font dialogs
   open from the pop-ups, and those are dialogs, not popovers.
+- **Cut, copy, paste and duplicate marks** (Nick's request 23 Nov 2026,
+  branch `feature/copy-paste-marks`, not yet released). Ctrl+X/C/V/D and
+  the mark context menu (Cut, Copy, Paste, Duplicate; the image menu gets
+  Paste at the click). Works for every mark kind and for several selected
+  marks (see the next item). **The clipboard scheme** (module comment in `src/clip.rs`):
+  one system clipboard, last copy wins. Ctrl+C copies the selected mark, or
+  the whole image when nothing is selected; Copy Image (header button,
+  Ctrl+Shift+C, image menu) always copies the image. A mark copy puts a
+  trimmed transparent picture of the mark (`render::render_marks`) plus a
+  private type `application/x-org.outram.pygoscribe-marks` on the
+  clipboard, and keeps the shapes in a thread-local in this process (all
+  windows are one instance). Paste checks that the clipboard's content is
+  still that provider (`clip::has_marks`), so a later copy anywhere wins
+  without guessing. Ctrl+V with no marks marks up the clipboard image in an
+  empty window, otherwise toasts a pointer to Mark Up Clipboard (opening it
+  would replace the page). Placement (`document::place`): each paste moves
+  20 screen px further down-right (the first after Cut lands in place);
+  if the centre would be outside the shown area, the marks are centred in
+  it; the menu's Paste centres them on the click. Duplicate copies without
+  the clipboard, one step on, and selects the copy. Each is one undo step.
+  While a text field has focus (the text editor, the font size box) the
+  shortcuts go to it (`clipboard.cut/copy/paste` actions), since the
+  window's accelerators see them first. The old `win.paste` (Mark Up
+  Clipboard) is now `win.mark-up-clipboard`. Tests:
+  `placing_copies`, `pasting_several_keeps_layout_and_order`,
+  `copied_marks_picture_is_trimmed`, and display-backed
+  `cut_copy_paste_duplicate` (run alone under Broadway).
+- **Selecting several marks** (Nick: "add multimark", 23 Nov 2026, same
+  branch). `State::selected` stays the main mark (the tool bar shows its
+  style; handles, text editing, alignment and rotation use it alone) and
+  `State::also` holds the others; always set both through `select_one` /
+  `select_many`, and read the whole set with `selection()` (ascending).
+  Shift or Ctrl+click with Select toggles a mark; a drag on empty page is a
+  marquee (`Drag::Marquee`, marks whose drawn box is wholly inside,
+  `Document::marks_within`; Shift/Ctrl adds to the old selection); Ctrl+A
+  (handled in the window's key controller, not as an accelerator, so the
+  sidebar and text fields keep their own Ctrl+A) switches to Select and
+  selects all; the image menu has Select All Marks. Dragging a selected
+  mark moves the group (`Drag::Move { group }`). With several selected:
+  no handles (each mark gets its outline, lines a thin accent line), Delete,
+  cut/copy/paste/duplicate, Bring to Front / Send to Back
+  (`Document::restack_many`, keeps their order, replaces `restack`) all act
+  on the group as one undo step; a restyle sets only the fields that differ
+  from the main mark's old style on the others (`Shape::restyle_from`; ends
+  only on marks that have ends, never border and fill both off). Right-click
+  on a selected mark keeps the selection; the menu hides text items when
+  `MarkInfo::count` > 1. Tests: `restacking_several`,
+  `restyling_several_changes_only_what_changed`, `marks_within_a_box`, and
+  display-backed `multi_select`. `double_click_edits_shape_text` segfaults
+  under Broadway on master too (not caused by this).
 - **Snap was tried and abandoned** (Nick, 11 Nov: "stick with flatpak").
   `snapcraft --destructive-mode` refuses because Nick's laptop has Ubuntu Pro
   attached, and the LXD build kept failing on the Rust plugin's rustup check.

@@ -66,12 +66,14 @@ pub struct MarkupWindow {
     pages: Rc<RefCell<Option<Pages>>>,
     /// The page thumbnails.
     sidebar: Sidebar,
+    /// The Select tool's button (Select All switches to it).
+    select_button: gtk::ToggleButton,
 }
 
 /// The tool buttons, in tool-bar order: the tool, its icon (from the
 /// app's bundled icons) and its tooltip.
 const TOOLS: &[(Tool, &str, &str)] = &[
-    (Tool::Select, "markup-select-symbolic", "Select (V) · Alt+drag to rotate"),
+    (Tool::Select, "markup-select-symbolic", "Select (V) · Shift+click or drag a box to select several · Alt+drag to rotate"),
     (Tool::Pen, "markup-pen-symbolic", "Draw (P)"),
     (Tool::Highlighter, "markup-highlighter-symbolic", "Highlight (H)"),
     (Tool::Line, "markup-line-symbolic", "Line (L) · Shift to snap to 15°"),
@@ -819,8 +821,8 @@ impl MarkupWindow {
         // Output, rightmost first: Copy (the main action), Save, Send To.
         let copy_btn = gtk::Button::builder()
             .label("Copy")
-            .tooltip_text("Copy to Clipboard (Ctrl+C)")
-            .action_name("win.copy")
+            .tooltip_text("Copy Image to Clipboard (Ctrl+Shift+C)")
+            .action_name("win.copy-image")
             .build();
         copy_btn.add_css_class("suggested-action");
         // Primary menu at the far end (GNOME HIG), then Copy.
@@ -935,7 +937,8 @@ impl MarkupWindow {
             .sync_create()
             .build();
 
-        let this = Self { window, stack, title, canvas, toasts, pages: Rc::new(RefCell::new(None)), sidebar };
+        let select_button = tool_buttons[0].1.clone();
+        let this = Self { window, stack, title, canvas, toasts, pages: Rc::new(RefCell::new(None)), sidebar, select_button };
 
         {
             // Remember the sidebar's visibility; only write when it changed.
@@ -998,6 +1001,13 @@ impl MarkupWindow {
                     w.step_page(step);
                     return glib::Propagation::Stop;
                 }
+            }
+            // Ctrl+A selects every mark. Handled here rather than as a
+            // window shortcut, which would take Ctrl+A from the page
+            // sidebar and text fields too.
+            if mods == gdk::ModifierType::CONTROL_MASK && key.to_lower() == gdk::Key::a {
+                w.select_all_marks();
+                return glib::Propagation::Stop;
             }
             // Letters with Ctrl or Alt are shortcuts for other things (Ctrl+C
             // is Copy), so only bare or Shifted letters pick a tool.
@@ -1099,13 +1109,33 @@ impl MarkupWindow {
             action.connect_activate(move |_, _| f(&target));
             this.window.add_action(&action);
         };
-        add("copy", MarkupWindow::copy);
+        // Ctrl+C copies the selected mark, or the image if none is selected;
+        // Copy Image always copies the image (see `clip` for the scheme).
+        add("copy", |w| {
+            if !w.forward_clipboard("copy") && !w.canvas.copy_selected(false) {
+                w.copy();
+            }
+        });
+        add("copy-image", MarkupWindow::copy);
+        add("cut", |w| {
+            if !w.forward_clipboard("cut") {
+                w.canvas.copy_selected(true);
+            }
+        });
+        add("paste", MarkupWindow::paste);
+        add("paste-here", |w| {
+            if !w.canvas.paste(true) {
+                w.toast("There are no copied marks to paste");
+            }
+        });
+        add("duplicate", |w| w.canvas.duplicate_selected());
+        add("select-all", MarkupWindow::select_all_marks);
         add("save", |w| w.save_as(crate::settings::get().save_format));
         add("save-png", |w| w.save_as(SaveFormat::Png));
         add("save-jpeg", |w| w.save_as(SaveFormat::Jpeg));
         add("save-pdf", |w| w.save_as(SaveFormat::Pdf));
         add("save-original", MarkupWindow::save_original);
-        add("paste", MarkupWindow::load_clipboard);
+        add("mark-up-clipboard", MarkupWindow::load_clipboard);
         add("mark-edit", |w| {
             w.canvas.edit_selected_text();
         });
@@ -1154,6 +1184,10 @@ impl MarkupWindow {
         app.set_accels_for_action("win.next-page", &["<Alt>Down"]);
         app.set_accels_for_action("win.previous-page", &["<Alt>Up"]);
         app.set_accels_for_action("win.copy", &["<Control>c"]);
+        app.set_accels_for_action("win.copy-image", &["<Control><Shift>c"]);
+        app.set_accels_for_action("win.cut", &["<Control>x"]);
+        app.set_accels_for_action("win.paste", &["<Control>v"]);
+        app.set_accels_for_action("win.duplicate", &["<Control>d"]);
         app.set_accels_for_action("win.save", &["<Control>s", "<Control><Shift>s"]);
         this.update_actions();
         this.update_mark_actions();
@@ -1268,6 +1302,38 @@ impl MarkupWindow {
             let what = self.page_word();
             self.toast(&format!("Copied {what}to clipboard"));
         }
+    }
+
+    /// Selects every mark on the page, with the Select tool so they can be
+    /// dragged together.
+    fn select_all_marks(&self) {
+        self.select_button.set_active(true);
+        self.canvas.select_all();
+    }
+
+    /// Ctrl+V: pastes copied marks. With none on the clipboard, an empty
+    /// window marks up the clipboard's image instead; otherwise a toast
+    /// says where that is (opening it here would replace this page).
+    fn paste(&self) {
+        if self.forward_clipboard("paste") || self.canvas.paste(false) {
+            return;
+        }
+        if self.pages.borrow().is_none() {
+            self.load_clipboard();
+        } else {
+            self.toast("There are no copied marks to paste. To open the clipboard's image, use Mark Up Clipboard");
+        }
+    }
+
+    /// Hands cut, copy or paste (`op`) to a text field that has the focus,
+    /// such as the font size box, since the window's shortcuts see Ctrl+C
+    /// and friends first. Returns true if one took it.
+    fn forward_clipboard(&self, op: &str) -> bool {
+        let Some(focus) = gtk::prelude::RootExt::focus(&self.window) else { return false };
+        if !(focus.is::<gtk::Text>() || focus.is::<gtk::TextView>()) {
+            return false;
+        }
+        focus.activate_action(&format!("clipboard.{op}"), None).is_ok()
     }
 
     /// The suggested file name: for a PDF, "name-marked.pdf" (the whole
@@ -1476,12 +1542,17 @@ impl MarkupWindow {
         enable("mark-front", mark.is_some_and(|m| m.can_raise));
         enable("mark-back", mark.is_some_and(|m| m.can_lower));
         enable("mark-delete", mark.is_some());
+        enable("cut", mark.is_some());
+        enable("duplicate", mark.is_some());
     }
 
     /// The right-click menu: for a mark, what can be done to it; for the
     /// image, the output and size actions. Every item is also a button or
     /// shortcut elsewhere, as the GNOME guidelines ask.
     fn show_context_menu(&self, at: (f64, f64), mark: Option<crate::canvas::MarkInfo>) {
+        if let Some(a) = self.window.lookup_action("paste-here").and_downcast::<gio::SimpleAction>() {
+            a.set_enabled(self.canvas.can_paste());
+        }
         let menu = gio::Menu::new();
         if let Some(m) = mark {
             if m.holds_text {
@@ -1511,17 +1582,26 @@ impl MarkupWindow {
                 edit.append_submenu(Some("Text Alignment"), &align);
                 menu.append_section(None, &edit);
             }
+            let clip = gio::Menu::new();
+            clip.append(Some("Cut"), Some("win.cut"));
+            clip.append(Some("Copy"), Some("win.copy"));
+            clip.append(Some("Paste"), Some("win.paste-here"));
+            clip.append(Some("Duplicate"), Some("win.duplicate"));
+            menu.append_section(None, &clip);
             let order = gio::Menu::new();
             order.append(Some("Bring to Front"), Some("win.mark-front"));
             order.append(Some("Send to Back"), Some("win.mark-back"));
             menu.append_section(None, &order);
             let delete = gio::Menu::new();
-            delete.append(Some("Delete"), Some("win.mark-delete"));
+            let label = if m.count > 1 { format!("Delete {} Marks", m.count) } else { "Delete".to_string() };
+            delete.append(Some(&label), Some("win.mark-delete"));
             menu.append_section(None, &delete);
         } else {
             let clip = gio::Menu::new();
-            clip.append(Some("Copy"), Some("win.copy"));
-            clip.append(Some("Mark Up Clipboard"), Some("win.paste"));
+            clip.append(Some("Paste"), Some("win.paste-here"));
+            clip.append(Some("Select All Marks"), Some("win.select-all"));
+            clip.append(Some("Copy Image"), Some("win.copy-image"));
+            clip.append(Some("Mark Up Clipboard"), Some("win.mark-up-clipboard"));
             menu.append_section(None, &clip);
             let save = gio::Menu::new();
             save.append(Some("Save (Replace Original)…"), Some("win.save-original"));

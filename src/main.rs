@@ -47,6 +47,7 @@ mod autostart;
 mod launch;
 mod migrate;
 mod canvas;
+mod clip;
 mod document;
 mod output;
 mod pages;

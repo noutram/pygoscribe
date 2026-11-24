@@ -326,6 +326,49 @@ impl Default for Style {
     }
 }
 
+impl Shape {
+    /// Restyles one of several selected marks: every part of the style
+    /// that changed from `old` to `new` (the tool bar showing another
+    /// selected mark's style) is set, the rest stays this mark's own. Line
+    /// ends only go to marks that have them, and a box never loses both
+    /// its border and its fill.
+    pub fn restyle_from(&mut self, old: &Style, new: &Style) {
+        let st = &mut self.style;
+        if old.stroke != new.stroke {
+            st.stroke = new.stroke;
+        }
+        if old.border != new.border {
+            st.border = new.border;
+        }
+        if old.fill != new.fill {
+            st.fill = new.fill;
+        }
+        if old.width != new.width {
+            st.width = new.width;
+        }
+        if old.font_size != new.font_size {
+            st.font_size = new.font_size;
+        }
+        if old.font != new.font {
+            st.font = new.font.clone();
+        }
+        if old.line != new.line {
+            st.line = new.line;
+        }
+        if EndsFor::of_kind(&self.kind).is_some() {
+            if old.start != new.start {
+                st.start = new.start;
+            }
+            if old.end != new.end {
+                st.end = new.end;
+            }
+        }
+        if !st.border && st.fill.is_none() {
+            st.border = true;
+        }
+    }
+}
+
 /// What a mark is, with any data only that kind needs.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Kind {
@@ -836,20 +879,51 @@ impl Document {
         self.crop = self.crop.map(|r| Rect { x: (r.x * k).round(), y: (r.y * k).round(), w: (r.w * k).round().max(1.0), h: (r.h * k).round().max(1.0) });
     }
 
-    /// Moves mark `idx` to the top (`front`) or bottom of the stack.
-    /// Returns its new index.
-    pub fn restack(&mut self, idx: usize, front: bool) -> usize {
-        if idx >= self.shapes.len() {
-            return idx;
+    /// Moves the marks at `indices` to the top (`front`) or bottom of the
+    /// stack, keeping their order among themselves. Returns their new
+    /// indices, ascending.
+    pub fn restack_many(&mut self, indices: &[usize], front: bool) -> Vec<usize> {
+        let mut idx: Vec<usize> = indices.iter().copied().filter(|&i| i < self.shapes.len()).collect();
+        idx.sort_unstable();
+        idx.dedup();
+        let shapes = std::mem::take(&mut self.shapes);
+        let (mut moved, mut rest) = (Vec::new(), Vec::new());
+        for (i, s) in shapes.into_iter().enumerate() {
+            if idx.binary_search(&i).is_ok() { moved.push(s) } else { rest.push(s) }
         }
-        let shape = self.shapes.remove(idx);
+        let n = moved.len();
         if front {
-            self.shapes.push(shape);
-            self.shapes.len() - 1
+            let start = rest.len();
+            rest.extend(moved);
+            self.shapes = rest;
+            (start..start + n).collect()
         } else {
-            self.shapes.insert(0, shape);
-            0
+            moved.extend(rest);
+            self.shapes = moved;
+            (0..n).collect()
         }
+    }
+
+    /// Indices of the marks whose drawn box lies inside `r`.
+    pub fn marks_within(&self, r: &Rect) -> Vec<usize> {
+        (0..self.shapes.len())
+            .filter(|&i| {
+                outline_bounds(std::slice::from_ref(&self.shapes[i])).is_some_and(|b| {
+                    b.x >= r.x && b.y >= r.y && b.x + b.w <= r.x + r.w && b.y + b.h <= r.y + r.h
+                })
+            })
+            .collect()
+    }
+
+    /// Puts copies of `shapes` on top of the stack, keeping their order.
+    /// Returns the index of the last one (the topmost), or None if
+    /// `shapes` is empty.
+    pub fn add_on_top(&mut self, shapes: Vec<Shape>) -> Option<usize> {
+        if shapes.is_empty() {
+            return None;
+        }
+        self.shapes.extend(shapes);
+        Some(self.shapes.len() - 1)
     }
 
     /// The topmost text mark at `p`, if any.
@@ -875,6 +949,57 @@ impl Document {
         }
         false
     }
+}
+
+/// The upright box around `shapes` as drawn (rotation included, line
+/// width not), or None if there are none.
+pub fn outline_bounds(shapes: &[Shape]) -> Option<Rect> {
+    let mut pts = shapes.iter().flat_map(Shape::outline);
+    let first = pts.next()?;
+    let (mut x0, mut y0, mut x1, mut y1) = (first.0, first.1, first.0, first.1);
+    for (x, y) in pts {
+        x0 = x0.min(x);
+        y0 = y0.min(y);
+        x1 = x1.max(x);
+        y1 = y1.max(y);
+    }
+    Some(Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 })
+}
+
+/// Where pasted or duplicated marks go.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Placement {
+    /// Moved by this much from where they were copied (down and right, so
+    /// a copy is seen next to its original), then brought into `view` if
+    /// their centre would fall outside it.
+    Offset { by: f64, view: Rect },
+    /// Centred on this point (pasting at a right-click).
+    At(Point),
+}
+
+/// Copies of `shapes`, moved as `placement` says. They keep their layout
+/// relative to each other.
+pub fn place(shapes: &[Shape], placement: Placement) -> Vec<Shape> {
+    let mut out = shapes.to_vec();
+    let Some(r) = outline_bounds(&out) else { return out };
+    let centre = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+    let (dx, dy) = match placement {
+        Placement::At(p) => (p.0 - centre.0, p.1 - centre.1),
+        Placement::Offset { by, view } => {
+            let moved = (centre.0 + by, centre.1 + by);
+            if view.contains(moved, 0.0) {
+                (by, by)
+            } else {
+                // Out of sight (copied from another page, or scrolled
+                // away): put them in the middle of what is shown.
+                (view.x + view.w / 2.0 - centre.0, view.y + view.h / 2.0 - centre.1)
+            }
+        }
+    };
+    for s in &mut out {
+        s.translate(dx, dy);
+    }
+    out
 }
 
 /// Undo/redo by whole-document snapshots; documents are small (see the
@@ -1153,11 +1278,11 @@ mod tests {
         for x in [1.0, 2.0, 3.0] {
             doc.shapes.push(Shape::new(Kind::Rect, (x, x), Style::default()));
         }
-        assert_eq!(doc.restack(0, true), 2);
+        assert_eq!(doc.restack_many(&[0], true), vec![2]);
         assert_eq!(doc.shapes.iter().map(|s| s.a.0).collect::<Vec<_>>(), vec![2.0, 3.0, 1.0]);
-        assert_eq!(doc.restack(1, false), 0);
+        assert_eq!(doc.restack_many(&[1], false), vec![0]);
         assert_eq!(doc.shapes.iter().map(|s| s.a.0).collect::<Vec<_>>(), vec![3.0, 2.0, 1.0]);
-        assert_eq!(doc.restack(9, true), 9, "out of range does nothing");
+        assert_eq!(doc.restack_many(&[9], true), Vec::<usize>::new(), "out of range does nothing");
     }
 
     /// Undo then Redo returns to the same document.
@@ -1172,5 +1297,78 @@ mod tests {
         assert!(doc.shapes.is_empty());
         assert!(h.redo(&mut doc));
         assert_eq!(doc.shapes.len(), 1);
+    }
+
+    /// A pasted copy moves down and right by the offset; one whose centre
+    /// would land outside the view is centred in the view instead.
+    #[test]
+    fn placing_copies() {
+        let mut s = Shape::new(Kind::Rect, (10.0, 10.0), Style::default());
+        s.b = (30.0, 20.0);
+        let view = Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 };
+        let near = place(std::slice::from_ref(&s), Placement::Offset { by: 15.0, view });
+        assert_eq!((near[0].a, near[0].b), ((25.0, 25.0), (45.0, 35.0)));
+        let far_view = Rect { x: 500.0, y: 500.0, w: 100.0, h: 100.0 };
+        let moved = place(std::slice::from_ref(&s), Placement::Offset { by: 15.0, view: far_view });
+        assert_eq!(moved[0].center(), (550.0, 550.0));
+        let at = place(std::slice::from_ref(&s), Placement::At((0.0, 0.0)));
+        assert_eq!(at[0].center(), (0.0, 0.0));
+    }
+
+    /// Several marks keep their layout relative to each other, freehand
+    /// points included, and land on top of the stack in order.
+    #[test]
+    fn pasting_several_keeps_layout_and_order() {
+        let mut line = Shape::new(Kind::Line, (0.0, 0.0), Style::default());
+        line.b = (10.0, 0.0);
+        let mut pen = Shape::new(Kind::Pen(vec![(20.0, 20.0), (30.0, 40.0)]), (20.0, 20.0), Style::default());
+        pen.b = (30.0, 40.0);
+        let copies = place(&[line.clone(), pen.clone()], Placement::At((100.0, 100.0)));
+        let (dx, dy) = (copies[0].a.0 - line.a.0, copies[0].a.1 - line.a.1);
+        assert_eq!(copies[1].a, (pen.a.0 + dx, pen.a.1 + dy));
+        assert_eq!(copies[1].kind, Kind::Pen(vec![(20.0 + dx, 20.0 + dy), (30.0 + dx, 40.0 + dy)]));
+        let mut doc = Document { shapes: vec![line.clone()], ..Default::default() };
+        assert_eq!(doc.add_on_top(copies.clone()), Some(2));
+        assert_eq!(&doc.shapes[1..], &copies[..]);
+        assert_eq!(doc.add_on_top(Vec::new()), None);
+    }
+
+    /// Several marks go to the front or back together, in their order.
+    #[test]
+    fn restacking_several() {
+        let mark = |x: f64| Shape::new(Kind::Rect, (x, 0.0), Style::default());
+        let mut doc = Document { shapes: (0..5).map(|i| mark(f64::from(i))).collect(), ..Default::default() };
+        assert_eq!(doc.restack_many(&[3, 1], true), vec![3, 4]);
+        let xs: Vec<f64> = doc.shapes.iter().map(|s| s.a.0).collect();
+        assert_eq!(xs, [0.0, 2.0, 4.0, 1.0, 3.0]);
+        assert_eq!(doc.restack_many(&[4, 2], false), vec![0, 1]);
+        let xs: Vec<f64> = doc.shapes.iter().map(|s| s.a.0).collect();
+        assert_eq!(xs, [4.0, 3.0, 0.0, 2.0, 1.0]);
+    }
+
+    /// Restyling several marks changes only what was changed, and keeps
+    /// line ends off marks that have none.
+    #[test]
+    fn restyling_several_changes_only_what_changed() {
+        let old = Style::default();
+        let new = Style { width: 9.0, end: LineEnd::Arrow, ..old.clone() };
+        let mut rect = Shape::new(Kind::Rect, (0.0, 0.0), Style { stroke: Rgba::new(0.0, 0.0, 1.0, 1.0), ..old.clone() });
+        rect.restyle_from(&old, &new);
+        assert_eq!((rect.style.width, rect.style.end, rect.style.stroke), (9.0, LineEnd::None, Rgba::new(0.0, 0.0, 1.0, 1.0)));
+        let mut line = Shape::new(Kind::Line, (0.0, 0.0), old.clone());
+        line.restyle_from(&old, &new);
+        assert_eq!(line.style.end, LineEnd::Arrow);
+    }
+
+    /// A marquee takes the marks wholly inside it.
+    #[test]
+    fn marks_within_a_box() {
+        let mut a = Shape::new(Kind::Rect, (10.0, 10.0), Style::default());
+        a.b = (20.0, 20.0);
+        let mut b = Shape::new(Kind::Rect, (15.0, 15.0), Style::default());
+        b.b = (60.0, 60.0);
+        let doc = Document { shapes: vec![a, b], ..Default::default() };
+        assert_eq!(doc.marks_within(&Rect { x: 0.0, y: 0.0, w: 30.0, h: 30.0 }), vec![0]);
+        assert_eq!(doc.marks_within(&Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }), vec![0, 1]);
     }
 }

@@ -695,6 +695,79 @@ pub fn export(image: &ImageSurface, doc: &Document) -> Result<gdk::Texture, cair
     texture_from_surface(out)
 }
 
+/// The largest side, in pixels, of a picture of copied marks.
+const MARKS_MAX: f64 = 8192.0;
+
+/// A picture of `shapes` alone on a transparent background, trimmed to
+/// what they cover, for other apps to paste when marks are copied. A loupe
+/// shows `image` magnified, as it does on the page. None if the marks draw
+/// nothing or would make a picture over [`MARKS_MAX`] pixels across.
+pub fn render_marks(image: &ImageSurface, shapes: &[Shape]) -> Result<Option<gdk::Texture>, cairo::Error> {
+    let Some(r) = crate::document::outline_bounds(shapes) else { return Ok(None) };
+    // Strokes, line ends and text reach past the marks' points: leave
+    // room for them, then trim what stays empty.
+    let mut room: f64 = 8.0;
+    let mut r = r;
+    for s in shapes {
+        let w = s.style.width;
+        room = room.max(s.highlighter_width() + 3.0 * w + 8.0 + w).max(s.style.font_size);
+        if let Some(q) = line_label_outline(s) {
+            for (x, y) in q {
+                let (x0, y0) = (r.x.min(x), r.y.min(y));
+                let (x1, y1) = ((r.x + r.w).max(x), (r.y + r.h).max(y));
+                r = Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+            }
+        }
+    }
+    let (x0, y0) = ((r.x - room).floor(), (r.y - room).floor());
+    let (w, h) = ((r.x + r.w + room).ceil() - x0, (r.y + r.h + room).ceil() - y0);
+    if w > MARKS_MAX || h > MARKS_MAX || w < 1.0 || h < 1.0 {
+        return Ok(None);
+    }
+    let surface = ImageSurface::create(cairo::Format::ARgb32, w as i32, h as i32)?;
+    {
+        let cr = Context::new(&surface)?;
+        cr.translate(-x0, -y0);
+        let background = |cr: &Context| paint_image(cr, image);
+        for shape in shapes {
+            draw_shape_on(&cr, &background, shape);
+        }
+    }
+    surface.flush();
+    let Some((tx, ty, tw, th)) = opaque_bounds(&surface) else { return Ok(None) };
+    let out = ImageSurface::create(cairo::Format::ARgb32, tw, th)?;
+    {
+        let cr = Context::new(&out)?;
+        cr.set_source_surface(&surface, -f64::from(tx), -f64::from(ty))?;
+        cr.paint()?;
+    }
+    texture_from_surface(out).map(Some)
+}
+
+/// The smallest box (x, y, width, height) holding every pixel of an ARGB32
+/// surface that isn't fully transparent, or None if all are.
+fn opaque_bounds(surface: &ImageSurface) -> Option<(i32, i32, i32, i32)> {
+    let (w, h, stride) = (surface.width(), surface.height(), surface.stride() as usize);
+    let mut found: Option<(i32, i32, i32, i32)> = None;
+    surface
+        .with_data(|d| {
+            for y in 0..h {
+                let row = &d[y as usize * stride..][..w as usize * 4];
+                // Native-endian ARGB32: alpha is the top byte of each u32.
+                let alpha = |x: usize| u32::from_ne_bytes([row[4 * x], row[4 * x + 1], row[4 * x + 2], row[4 * x + 3]]) >> 24;
+                let Some(first) = (0..w as usize).find(|&x| alpha(x) != 0) else { continue };
+                let last = (0..w as usize).rfind(|&x| alpha(x) != 0).unwrap_or(first);
+                let (first, last) = (first as i32, last as i32);
+                found = Some(match found {
+                    None => (first, y, last, y),
+                    Some((x0, y0, x1, _)) => (x0.min(first), y0, x1.max(last), y),
+                });
+            }
+        })
+        .ok()?;
+    found.map(|(x0, y0, x1, y1)| (x0, y0, x1 - x0 + 1, y1 - y0 + 1))
+}
+
 /// A small picture of a marked-up page for the page sidebar: the page
 /// (`size` in image pixels) with its marks and crop, scaled by `scale`, on
 /// white.
@@ -1004,6 +1077,22 @@ mod tests {
         rect.valign = VAlign::Bottom;
         let br = ink(&rect).unwrap();
         assert!(br.x + br.w > 175.0 && br.y + br.h > 75.0, "bottom right: {br:?}");
+    }
+
+    /// A picture of copied marks is trimmed to what they draw: a rectangle
+    /// and its border, nothing of the page around it.
+    #[test]
+    fn copied_marks_picture_is_trimmed() {
+        let image = ImageSurface::create(cairo::Format::ARgb32, 200, 200).unwrap();
+        let mut rect = Shape::new(Kind::Rect, (10.0, 10.0), black());
+        rect.style.width = 4.0;
+        rect.style.border = true;
+        rect.style.fill = None;
+        rect.b = (50.0, 30.0);
+        let t = render_marks(&image, &[rect]).unwrap().unwrap();
+        // 40 × 20 plus half the border each side, give or take antialiasing.
+        assert!((44..=46).contains(&t.width()) && (24..=26).contains(&t.height()), "{} × {}", t.width(), t.height());
+        assert!(render_marks(&image, &[]).unwrap().is_none());
     }
 
     /// Line text sits above or below, and reads upright either way round.

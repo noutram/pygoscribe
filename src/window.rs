@@ -122,27 +122,7 @@ impl ColourControl {
     fn new(c: Rgba, what: &str) -> Self {
         let colour = gtk::ColorDialogButton::new(Some(gtk::ColorDialog::builder().with_alpha(true).build()));
         colour.set_tooltip_text(Some(&format!("{what} Colour")));
-        let opacity = gtk::Adjustment::new(100.0, 0.0, 100.0, 5.0, 25.0, 0.0);
-
-        let scale = gtk::Scale::new(gtk::Orientation::Horizontal, Some(&opacity));
-        scale.set_digits(0);
-        scale.set_round_digits(0);
-        scale.set_draw_value(true);
-        scale.set_value_pos(gtk::PositionType::Right);
-        scale.set_format_value_func(|_, v| format!("{v:.0}%"));
-        scale.set_size_request(160, -1);
-        scale.set_tooltip_text(Some(&format!("{what} Opacity")));
-        let presets = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        presets.add_css_class("linked");
-        presets.set_homogeneous(true);
-        for p in OPACITY_PRESETS {
-            let b = gtk::Button::with_label(&format!("{p}%"));
-            let adj = opacity.clone();
-            b.connect_clicked(move |_| adj.set_value(p as f64));
-            presets.append(&b);
-        }
-        presets.set_halign(gtk::Align::End);
-        presets.set_tooltip_text(Some(&format!("{what} Opacity")));
+        let (opacity, scale, presets) = opacity_slider(what);
 
         let widget = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         widget.append(&colour);
@@ -192,6 +172,59 @@ impl ColourControl {
     }
 }
 
+/// An opacity slider in percent (0–100, starting at 100) with its preset
+/// buttons, tooltips naming `what`: the adjustment, the slider, the presets.
+fn opacity_slider(what: &str) -> (gtk::Adjustment, gtk::Scale, gtk::Box) {
+    let opacity = gtk::Adjustment::new(100.0, 0.0, 100.0, 5.0, 25.0, 0.0);
+    let scale = gtk::Scale::new(gtk::Orientation::Horizontal, Some(&opacity));
+    scale.set_digits(0);
+    scale.set_round_digits(0);
+    scale.set_draw_value(true);
+    scale.set_value_pos(gtk::PositionType::Right);
+    scale.set_format_value_func(|_, v| format!("{v:.0}%"));
+    scale.set_size_request(160, -1);
+    scale.set_tooltip_text(Some(&format!("{what} Opacity")));
+    let presets = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    presets.add_css_class("linked");
+    presets.set_homogeneous(true);
+    for p in OPACITY_PRESETS {
+        let b = gtk::Button::with_label(&format!("{p}%"));
+        let adj = opacity.clone();
+        b.connect_clicked(move |_| adj.set_value(p as f64));
+        presets.append(&b);
+    }
+    presets.set_halign(gtk::Align::End);
+    presets.set_tooltip_text(Some(&format!("{what} Opacity")));
+    (opacity, scale, presets)
+}
+
+/// The opacity of picture marks: a slider and presets in the Colours
+/// pop-up, greyed out unless a picture is selected. Not remembered: each
+/// new picture starts opaque.
+#[derive(Clone)]
+struct PictureOpacity {
+    /// Opacity in percent, 0–100.
+    value: gtk::Adjustment,
+    /// The slider.
+    scale: gtk::Scale,
+    /// 100/75/50/25 % buttons.
+    presets: gtk::Box,
+}
+
+impl PictureOpacity {
+    /// A slider at 100 %.
+    fn new() -> Self {
+        let (value, scale, presets) = opacity_slider("Picture");
+        Self { value, scale, presets }
+    }
+
+    /// Greys the controls out, or not.
+    fn set_sensitive(&self, on: bool) {
+        self.scale.set_sensitive(on);
+        self.presets.set_sensitive(on);
+    }
+}
+
 /// The style controls in the markup toolbar.
 #[derive(Clone)]
 struct StyleControls {
@@ -214,6 +247,8 @@ struct StyleControls {
     /// Which kind of mark the two end controls belong to, so a change is
     /// remembered for that kind; None while they don't apply.
     ends_for: Rc<Cell<Option<EndsFor>>>,
+    /// Opacity of picture marks.
+    picture: PictureOpacity,
     /// Text size.
     font: gtk::SpinButton,
     /// Font family and style (no size).
@@ -294,7 +329,8 @@ impl StyleControls {
                 None
             });
         }
-        let colours_menu = colours_menu(&border_on, &stroke, &fill_on, &fill);
+        let picture = PictureOpacity::new();
+        let colours_menu = colours_menu(&border_on, &stroke, &fill_on, &fill, &picture);
         let line_menu = line_menu(&width, &line, &start, &end, [line_row, start_row, end_row]);
         let text_menu = text_menu(&face, &font);
         let this = Self {
@@ -310,11 +346,13 @@ impl StyleControls {
             start,
             end,
             ends_for: Rc::new(Cell::new(None)),
+            picture,
             font,
             face,
             syncing: Rc::new(Cell::new(false)),
         };
         this.set_ends_for(None, false);
+        this.picture.set_sensitive(false);
         // A shape needs a border or a fill: turning one off turns the other on.
         // Connected before `connect_changed`, so the change is seen as one.
         let other = this.fill_on.clone();
@@ -344,6 +382,7 @@ impl StyleControls {
             line: self.line_style(),
             start: end_at(&self.start),
             end: end_at(&self.end),
+            opacity: self.picture.value.value() / 100.0,
         }
     }
 
@@ -421,6 +460,7 @@ impl StyleControls {
         self.line.set_selected(line_index(style.line));
         self.start.set_selected(end_index(style.start));
         self.end.set_selected(end_index(style.end));
+        self.picture.value.set_value((style.opacity * 100.0).round());
         self.font.set_value(style.font_size);
         // Only when it differs: setting it re-emits notify and rebuilds labels.
         if self.font_name() != style.font {
@@ -458,6 +498,8 @@ impl StyleControls {
         self.start.connect_selected_notify(move |_| e());
         let e = emit.clone();
         self.end.connect_selected_notify(move |_| e());
+        let e = emit.clone();
+        self.picture.value.connect_value_changed(move |_| e());
         let e = emit.clone();
         self.font.connect_value_changed(move |_| e());
         self.face.connect_font_desc_notify(move |_| emit());
@@ -586,7 +628,13 @@ fn form(title: &str, rows: &[(&str, gtk::Widget)]) -> gtk::Box {
 /// The Colours button: a small box drawn with the current border and fill
 /// (each left out while it's off), opening the Border and Fill rows, each
 /// an on/off toggle, a colour button and an opacity button.
-fn colours_menu(border_on: &gtk::ToggleButton, stroke: &ColourControl, fill_on: &gtk::ToggleButton, fill: &ColourControl) -> gtk::MenuButton {
+fn colours_menu(
+    border_on: &gtk::ToggleButton,
+    stroke: &ColourControl,
+    fill_on: &gtk::ToggleButton,
+    fill: &ColourControl,
+    picture: &PictureOpacity,
+) -> gtk::MenuButton {
     let sample = gtk::DrawingArea::builder().content_width(26).content_height(18).valign(gtk::Align::Center).build();
     {
         let (border_on, stroke, fill_on, fill) = (border_on.clone(), stroke.clone(), fill_on.clone(), fill.clone());
@@ -634,6 +682,8 @@ fn colours_menu(border_on: &gtk::ToggleButton, stroke: &ColourControl, fill_on: 
             ("", stroke.presets.clone().upcast()),
             ("Fill", row(fill_on, fill)),
             ("", fill.presets.clone().upcast()),
+            ("Picture", picture.scale.clone().upcast()),
+            ("", picture.presets.clone().upcast()),
         ],
     );
     let popover = gtk::Popover::builder().child(&body).build();
@@ -891,6 +941,15 @@ impl MarkupWindow {
             toolbar.append(&b);
             tool_buttons.push((*tool, b));
         }
+        // Insert Image: a picture from a file, as a mark.
+        toolbar.append(&gtk::Separator::new(gtk::Orientation::Vertical));
+        let insert_btn = gtk::Button::builder()
+            .icon_name("markup-image-symbolic")
+            .tooltip_text("Insert Image… · or paste one (Ctrl+V), or hold Shift while dropping one")
+            .action_name("win.insert-image")
+            .build();
+        insert_btn.add_css_class("flat");
+        toolbar.append(&insert_btn);
         let style = StyleControls::new();
         toolbar.append(&gtk::Separator::new(gtk::Orientation::Vertical));
         toolbar.append(&style.colours_menu);
@@ -973,6 +1032,7 @@ impl MarkupWindow {
                 if b.is_active() {
                     canvas.set_tool(tool);
                     style.border_on.set_sensitive(canvas.border_is_optional());
+                    style.picture.set_sensitive(canvas.picture_selected());
                     // Pen, Line and Arrow each bring back their own ends
                     // (drawing tools drop the selection, so nothing is restyled).
                     let own = EndsFor::of_tool(tool);
@@ -1051,6 +1111,7 @@ impl MarkupWindow {
                     style.show(&s);
                 }
                 style.border_on.set_sensitive(canvas.border_is_optional());
+                style.picture.set_sensitive(canvas.picture_selected());
                 style.set_ends_for(canvas.ends_for(), false);
                 w.update_mark_actions();
             });
@@ -1125,10 +1186,12 @@ impl MarkupWindow {
         add("paste", MarkupWindow::paste);
         add("paste-here", |w| {
             if !w.canvas.paste(true) {
-                w.toast("There are no copied marks to paste");
+                w.paste_picture(true);
             }
         });
         add("duplicate", |w| w.canvas.duplicate_selected());
+        add("insert-image", |w| w.choose_images(false));
+        add("insert-image-here", |w| w.choose_images(true));
         add("select-all", MarkupWindow::select_all_marks);
         add("save", |w| w.save_as(crate::settings::get().save_format));
         add("save-png", |w| w.save_as(SaveFormat::Png));
@@ -1157,6 +1220,10 @@ impl MarkupWindow {
         }
         add("mark-front", |w| w.canvas.restack_selected(true));
         add("mark-back", |w| w.canvas.restack_selected(false));
+        add("mark-forward", |w| w.canvas.step_selected(true));
+        add("mark-backward", |w| w.canvas.step_selected(false));
+        app.set_accels_for_action("win.mark-forward", &["<Control>Up"]);
+        app.set_accels_for_action("win.mark-backward", &["<Control>Down"]);
         add("mark-delete", |w| w.canvas.delete_selected());
         app.set_accels_for_action("win.mark-front", &["<Control><Shift>Up"]);
         app.set_accels_for_action("win.mark-back", &["<Control><Shift>Down"]);
@@ -1208,18 +1275,51 @@ impl MarkupWindow {
     }
 
     /// Opens files (from the file manager) or image data (from a browser)
-    /// dropped anywhere on the window. The sidebar's own page drags carry a
-    /// page number, not these types, so they never reach this target.
+    /// dropped anywhere on the window, or, with Shift held while dropping
+    /// on an open page, inserts the pictures as marks where they land. The
+    /// sidebar's own page drags carry a page number, not these types, so
+    /// they never reach this target.
+    ///
+    /// Why Shift: on GNOME (Wayland) the window under a drag from another
+    /// app doesn't have the keyboard, so it can't see which keys are held.
+    /// The compositor turns the keys into the drag's action instead: Shift
+    /// asks for Move, Ctrl for Copy. Copy is what a plain drop already
+    /// gets, so Ctrl can't be told apart; Move can. Accepting Move does not
+    /// make the file manager or a browser delete anything (they leave
+    /// files and web pictures alone), and the modifier state is checked
+    /// too for X11 and for drags within reach of the keyboard.
     fn add_file_drop_target(&self, widget: &impl IsA<gtk::Widget>) {
-        let target = gtk::DropTarget::new(glib::Type::INVALID, gdk::DragAction::COPY);
+        let target = gtk::DropTarget::new(glib::Type::INVALID, gdk::DragAction::COPY | gdk::DragAction::MOVE);
         target.set_types(&[gdk::FileList::static_type(), gdk::Texture::static_type()]);
+        // Copy unless the user asked for Move (Shift).
+        let pick = |t: &gtk::DropTarget| -> gdk::DragAction {
+            if wants_insert(t) { gdk::DragAction::MOVE } else { gdk::DragAction::COPY }
+        };
+        target.connect_enter(move |t, _, _| pick(t));
+        target.connect_motion(move |t, _, _| pick(t));
         let this = self.clone();
-        target.connect_drop(move |_, value, _, _| {
+        let widget_ref = widget.clone().upcast::<gtk::Widget>();
+        target.connect_drop(move |t, value, x, y| {
+            let insert = wants_insert(t) && this.pages.borrow().is_some();
+            // Where it landed, in the canvas's coordinates.
+            let at = insert
+                .then(|| widget_ref.compute_point(this.canvas.widget(), &gtk::graphene::Point::new(x as f32, y as f32)))
+                .flatten()
+                .map(|p| (f64::from(p.x()), f64::from(p.y())));
             if let Ok(list) = value.get::<gdk::FileList>() {
-                this.open_dropped_files(&list.files());
+                if insert {
+                    this.insert_files(&list.files(), at, false);
+                } else {
+                    this.open_dropped_files(&list.files());
+                }
                 true
             } else if let Ok(texture) = value.get::<gdk::Texture>() {
-                this.target_for_drop().set_texture(&texture, None);
+                if insert {
+                    this.insert_textures(&[texture], at, false);
+                } else {
+                    this.target_for_drop().set_texture(&texture, None);
+                    this.hint_shift_drop();
+                }
                 true
             } else {
                 false
@@ -1228,13 +1328,96 @@ impl MarkupWindow {
         widget.add_controller(target);
     }
 
+    /// After a drop opened a new window from a window with a page open:
+    /// says how to insert it as a mark instead.
+    fn hint_shift_drop(&self) {
+        if self.pages.borrow().is_some() {
+            self.toast("Opened in a new window. To add a picture to this page, hold Shift while dropping it");
+        }
+    }
+
+    /// Switches to Select and inserts `textures` as picture marks (see
+    /// `Canvas::insert_images`).
+    fn insert_textures(&self, textures: &[gdk::Texture], at: Option<(f64, f64)>, at_menu: bool) {
+        if textures.is_empty() {
+            return;
+        }
+        self.select_button.set_active(true);
+        if !self.canvas.insert_images(textures, at, at_menu) {
+            self.toast("Open an image or PDF first, then insert pictures into it");
+        }
+    }
+
+    /// Inserts image files as picture marks (see [`Self::insert_textures`]).
+    /// PDFs and other files are skipped with a toast.
+    fn insert_files(&self, files: &[gio::File], at: Option<(f64, f64)>, at_menu: bool) {
+        let mut textures = Vec::new();
+        let mut skipped = 0;
+        for file in files {
+            if crate::pdf::is_pdf(file) || !is_openable(file) {
+                skipped += 1;
+                continue;
+            }
+            match gdk::Texture::from_file(file) {
+                Ok(t) => textures.push(t),
+                Err(e) => self.toast(&format!("Could not open image: {e}")),
+            }
+        }
+        self.insert_textures(&textures, at, at_menu);
+        match skipped {
+            0 => {}
+            1 => self.toast("Only pictures can be inserted, not PDFs or other files"),
+            n => self.toast(&format!("{n} files are not pictures and were not inserted")),
+        }
+    }
+
+    /// Insert Image…: picks picture files and inserts them as marks, in the
+    /// middle of the view or (`at_menu`) where the context menu was opened.
+    fn choose_images(&self, at_menu: bool) {
+        let filter = gtk::FileFilter::new();
+        filter.set_name(Some("Images"));
+        filter.add_pixbuf_formats();
+        let filters = gio::ListStore::new::<gtk::FileFilter>();
+        filters.append(&filter);
+        let dialog = gtk::FileDialog::builder()
+            .title("Insert Image")
+            .accept_label("Insert")
+            .modal(true)
+            .filters(&filters)
+            .default_filter(&filter)
+            .build();
+        if let Some(folder) = crate::settings::get().open_folder {
+            dialog.set_initial_folder(Some(&gio::File::for_path(folder)));
+        }
+        let this = self.clone();
+        glib::spawn_future_local(async move {
+            let Ok(list) = dialog.open_multiple_future(Some(&this.window)).await else { return };
+            let files: Vec<gio::File> = list.iter::<gio::File>().filter_map(Result::ok).collect();
+            if let Some(folder) = files.first().and_then(crate::settings::folder_of) {
+                crate::settings::update(|s| s.open_folder = Some(folder));
+            }
+            let mut textures = Vec::new();
+            for file in &files {
+                match gdk::Texture::from_file(file) {
+                    Ok(t) => textures.push(t),
+                    Err(e) => this.toast(&format!("Could not open image: {e}")),
+                }
+            }
+            this.insert_textures(&textures, None, at_menu);
+        });
+    }
+
     /// Opens dropped files: images and PDFs only, the first one in this
     /// window if it's empty, and each other one in a window of its own (as
     /// Open With does), so nothing already marked up is replaced.
     fn open_dropped_files(&self, files: &[gio::File]) {
         let (wanted, skipped): (Vec<_>, Vec<_>) = files.iter().partition(|f| is_openable(f));
+        let opened_elsewhere = !wanted.is_empty() && self.pages.borrow().is_some();
         for file in wanted {
             self.target_for_drop().load_file(file);
+        }
+        if opened_elsewhere {
+            self.hint_shift_drop();
         }
         match skipped.as_slice() {
             [] => {}
@@ -1312,8 +1495,9 @@ impl MarkupWindow {
     }
 
     /// Ctrl+V: pastes copied marks. With none on the clipboard, an empty
-    /// window marks up the clipboard's image instead; otherwise a toast
-    /// says where that is (opening it here would replace this page).
+    /// window marks up the clipboard's image; with a page open, a picture
+    /// (or picture files copied in the file manager) on the clipboard is
+    /// inserted as a mark.
     fn paste(&self) {
         if self.forward_clipboard("paste") || self.canvas.paste(false) {
             return;
@@ -1321,7 +1505,35 @@ impl MarkupWindow {
         if self.pages.borrow().is_none() {
             self.load_clipboard();
         } else {
-            self.toast("There are no copied marks to paste. To open the clipboard's image, use Mark Up Clipboard");
+            self.paste_picture(false);
+        }
+    }
+
+    /// Inserts the clipboard's picture, or the picture files on it, as
+    /// marks (`at_menu`: where the context menu was opened).
+    fn paste_picture(&self, at_menu: bool) {
+        let clipboard = self.window.clipboard();
+        // Other apps offer MIME types; this adds the GDK types they can be read as.
+        let formats = clipboard.formats().union_deserialize_types();
+        let this = self.clone();
+        if formats.contains_type(gdk::Texture::static_type()) {
+            glib::spawn_future_local(async move {
+                match clipboard.read_texture_future().await {
+                    Ok(Some(texture)) => this.insert_textures(&[texture], None, at_menu),
+                    Ok(None) => this.toast("The clipboard does not contain a picture"),
+                    Err(err) => this.toast(&format!("Could not read the clipboard: {err}")),
+                }
+            });
+        } else if formats.contains_type(gdk::FileList::static_type()) {
+            glib::spawn_future_local(async move {
+                let read = clipboard.read_value_future(gdk::FileList::static_type(), glib::Priority::DEFAULT).await;
+                match read.ok().and_then(|v| v.get::<gdk::FileList>().ok()) {
+                    Some(list) => this.insert_files(&list.files(), None, at_menu),
+                    None => this.toast("Could not read the copied files"),
+                }
+            });
+        } else {
+            self.toast("There is nothing to paste. Copy a picture or a mark first");
         }
     }
 
@@ -1518,6 +1730,9 @@ impl MarkupWindow {
             }
         };
         enable("save-original", original);
+        let open = self.pages.borrow().is_some();
+        enable("insert-image", open);
+        enable("insert-image-here", open);
         enable("scale-to-visible", picture);
     }
 
@@ -1541,6 +1756,8 @@ impl MarkupWindow {
         }
         enable("mark-front", mark.is_some_and(|m| m.can_raise));
         enable("mark-back", mark.is_some_and(|m| m.can_lower));
+        enable("mark-forward", mark.is_some_and(|m| m.can_raise));
+        enable("mark-backward", mark.is_some_and(|m| m.can_lower));
         enable("mark-delete", mark.is_some());
         enable("cut", mark.is_some());
         enable("duplicate", mark.is_some());
@@ -1590,6 +1807,8 @@ impl MarkupWindow {
             menu.append_section(None, &clip);
             let order = gio::Menu::new();
             order.append(Some("Bring to Front"), Some("win.mark-front"));
+            order.append(Some("Bring Forward"), Some("win.mark-forward"));
+            order.append(Some("Send Backward"), Some("win.mark-backward"));
             order.append(Some("Send to Back"), Some("win.mark-back"));
             menu.append_section(None, &order);
             let delete = gio::Menu::new();
@@ -1599,6 +1818,7 @@ impl MarkupWindow {
         } else {
             let clip = gio::Menu::new();
             clip.append(Some("Paste"), Some("win.paste-here"));
+            clip.append(Some("Insert Image…"), Some("win.insert-image-here"));
             clip.append(Some("Select All Marks"), Some("win.select-all"));
             clip.append(Some("Copy Image"), Some("win.copy-image"));
             clip.append(Some("Mark Up Clipboard"), Some("win.mark-up-clipboard"));
@@ -2095,6 +2315,14 @@ fn is_openable(file: &gio::File) -> bool {
         .unwrap_or_default();
     let (kind, _) = gio::content_type_guess(file.basename(), head.as_slice());
     kind.starts_with("image/")
+}
+
+/// Whether a drop asks to insert pictures as marks rather than open them:
+/// Shift held, seen as the Move action the compositor picks for it, or in
+/// the modifier state where the window can see the keyboard.
+fn wants_insert(target: &gtk::DropTarget) -> bool {
+    let moving = target.current_drop().is_some_and(|d| d.actions() == gdk::DragAction::MOVE);
+    moving || target.current_event_state().contains(gdk::ModifierType::SHIFT_MASK)
 }
 
 /// The file's base name, for the title and suggested save names.

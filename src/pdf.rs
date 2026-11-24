@@ -468,6 +468,61 @@ mod tests {
         assert_eq!(head, inside);
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    /// A picture mark goes into the saved PDF as one embedded image where
+    /// it was placed; the other marks and the page stay vector.
+    #[test]
+    fn saves_image_marks_as_embedded_images() {
+        use crate::document::{Document, Kind, Picture, Rgba, Shape, Style};
+        let dir = std::env::temp_dir().join(format!("pygoscribe-pdf-image-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("blank.pdf");
+        {
+            let surface = cairo::PdfSurface::new(300.0, 200.0, &src).unwrap();
+            let cr = cairo::Context::new(&surface).unwrap();
+            cr.set_font_size(20.0);
+            cr.move_to(20.0, 180.0);
+            cr.show_text("Page text").unwrap();
+            cr.show_page().unwrap();
+            drop(cr);
+            surface.finish();
+        }
+        let pdf = Pdf::open(&gio::File::for_path(&src)).unwrap();
+        let img = cairo::ImageSurface::create(cairo::Format::ARgb32, 20, 10).unwrap();
+        {
+            let cr = cairo::Context::new(&img).unwrap();
+            cr.set_source_rgb(1.0, 0.0, 0.0);
+            cr.paint().unwrap();
+        }
+        // Image pixels are half points here (144 dpi): 100,100–300,200 is
+        // 50,50–150,100 in points.
+        let mut pic = Shape::image(Picture(img), (200.0, 150.0), (1000.0, 1000.0), Style::default());
+        pic.a = (100.0, 100.0);
+        pic.b = (300.0, 200.0);
+        let style = Style { stroke: Rgba::new(0.0, 0.0, 1.0, 1.0), fill: None, width: 6.0, ..Style::default() };
+        let mut rect = Shape::new(Kind::Rect, (400.0, 100.0), style);
+        rect.b = (500.0, 200.0);
+        let docs = vec![Document { shapes: vec![pic, rect], crop: None, image: None }];
+        let out = dir.join("image.pdf");
+        pdf.save_marked(&[0], &docs, &out).unwrap();
+
+        let back = Pdf::open(&gio::File::for_path(&out)).unwrap();
+        let page = back.0.page(0).unwrap();
+        let images = page.image_mapping();
+        assert_eq!(images.len(), 1, "one embedded image");
+        let text = page.text().map(|t| t.to_string()).unwrap_or_default();
+        assert!(text.contains("Page text"), "page text kept: {text:?}");
+        let (tex, _) = back.render(0).unwrap();
+        let mut dl = gdk::TextureDownloader::new(&tex);
+        dl.set_format(gdk::MemoryFormat::R8g8b8a8);
+        let (bytes, stride) = dl.download_bytes();
+        let px = |x: usize, y: usize| bytes[y * stride + x * 4..][..3].to_vec();
+        assert_eq!(px(200, 150), [255, 0, 0], "picture where it was placed");
+        assert_eq!(px(90, 150), [255, 255, 255], "and nowhere else");
+        let edge = px(400, 150);
+        assert!(edge[2] > 200 && edge[0] < 60, "rectangle drawn: {edge:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
 
 /// A stress test for the lock in [`Pdf::open`]: many threads open and render

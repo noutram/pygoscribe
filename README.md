@@ -211,7 +211,9 @@ of the app, and `src/main.rs` has a map of the modules. `cargo doc
   from a web browser) anywhere on a window to open them. An empty window
   opens the first one itself; anything else gets a window of its own, so a
   picture you're marking up is never replaced. Other kinds of file are
-  skipped with a message.
+  skipped with a message. **Hold Shift while dropping** on a page that is
+  already open to add the pictures to it as image marks instead (see
+  Image marks).
 
 ## Start at login
 
@@ -332,7 +334,7 @@ single-letter shortcuts work while the canvas has focus.
   part of the page to select every mark wholly inside it (hold Shift to add
   to what is already selected). **Ctrl+A** selects every mark on the page
   (and switches to Select). Dragging any selected mark moves them all.
-  Delete, cut, copy, paste, duplicate, Bring to Front and Send to Back act
+  Delete, cut, copy, paste, duplicate and the stacking commands act
   on all of them, each as one undo step. Changing a colour, width, line
   style, line ends or font changes just that on every selected mark, so
   each keeps the rest of its own style. Handles, text editing and rotating
@@ -356,16 +358,37 @@ single-letter shortcuts work while the canvas has focus.
   reaches other apps, as a picture of just the marks on a transparent
   background. Ctrl+V pastes marks only while they are still the last thing
   copied: once anything else has been copied, here or in another app, it
-  doesn't. In an empty window Ctrl+V marks up the image on the clipboard
-  instead. While you are typing text, the shortcuts cut, copy and paste
-  text as usual.
+  doesn't. Otherwise Ctrl+V adds a picture on the clipboard (or picture
+  files copied in the file manager) to the page as an image mark, and in an
+  empty window it marks up the clipboard's image instead. While you are
+  typing text, the shortcuts cut, copy and paste text as usual.
+- **Image marks:** put another picture on the page, for example a logo or
+  a screenshot of a detail. Three ways in: the **Insert Image** button
+  after the tools (or Insert Image… in the image's right-click menu, which
+  puts it where you clicked), which can pick several files at once;
+  **Ctrl+V** with a picture on the clipboard; or **Shift+drop** a picture
+  file, or a picture from a web browser, onto the page. A plain drop still
+  opens it in a window of its own (the toast says to hold Shift); Shift is
+  used because GNOME passes it on to the window under a drag as the "move"
+  action, while other keys held during a drag from another app don't reach
+  it. A new image mark is centred in the view (or where it was dropped),
+  at its own size in pixels or smaller to fit, and selected. It moves,
+  resizes, rotates (Alt+drag), restacks, cuts, copies, pastes, duplicates
+  and undoes like any other mark. Dragging a corner keeps its proportions;
+  hold **Shift** to stretch it freely. A picture's own transparency is
+  kept, and the **Picture** opacity slider in the Colours pop-up (active
+  while a picture is selected) fades the whole picture; each new picture
+  starts at 100 %. Saved PNGs and JPEGs include it, and
+  Save as PDF embeds it as an image at its full resolution while the page
+  and the other marks stay vector.
 - **Right-click** (or long-press on a touch screen, Shift+F10 or the Menu
   key) opens a context menu. On a mark it selects the mark (or keeps the
   selection, if the mark is one of several selected) and offers Edit
   Text or Add Text and Text Alignment (text marks, shapes, lines and arrows),
-  Cut, Copy, Paste and Duplicate, Bring to Front (Ctrl+Shift+Up), Send to
-  Back (Ctrl+Shift+Down) and Delete. Elsewhere on the image it offers
-  Paste (copied marks, at the click), Select All Marks, Copy Image, Mark
+  Cut, Copy, Paste and Duplicate, Bring to Front (Ctrl+Shift+Up), Bring
+  Forward (Ctrl+Up, one place up), Send Backward (Ctrl+Down, one place
+  down), Send to Back (Ctrl+Shift+Down) and Delete. Elsewhere on the image it offers
+  Paste (copied marks or a picture, at the click), Insert Image…, Select All Marks, Copy Image, Mark
   Up Clipboard, Save (Replace Original)…, Save As…, Scale Image to Visible
   Size, Actual Size and Zoom to Fit.
 

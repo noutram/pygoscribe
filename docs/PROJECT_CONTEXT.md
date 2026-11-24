@@ -378,7 +378,10 @@ poppler-rs 0.26, cairo-rs 0.22 (feature `pdf`), edition 2024. Flatpak uses GNOME
   Front / Send to Back / Delete; elsewhere the image menu (Copy, Mark Up
   Clipboard, Save, Save As, Scale, Actual Size, Zoom to Fit). Per the HIG
   every item also exists elsewhere: Bring to Front / Send to Back got
-  Ctrl+Shift+Up / Down (`Document::restack`, one undo step). The
+  Ctrl+Shift+Up / Down (`Document::restack`, one undo step). Bring
+  Forward / Send Backward (Ctrl+Up / Down, `Document::step_many`, Nick's
+  request 24 Nov 2026 on `feature/image-marks`) move the selection one
+  place, a block together, and record no step if nothing moved. The
   `GtkPopoverMenu` is built per use, parented to the drawing area, and
   unparented in idle after closing, like the text editor. Display-backed
   tests (`context_menu_targets`, `scale_to_visible_size`) must be run one at
@@ -549,8 +552,9 @@ poppler-rs 0.26, cairo-rs 0.22 (feature `pdf`), edition 2024. Flatpak uses GNOME
   windows are one instance). Paste checks that the clipboard's content is
   still that provider (`clip::has_marks`), so a later copy anywhere wins
   without guessing. Ctrl+V with no marks marks up the clipboard image in an
-  empty window, otherwise toasts a pointer to Mark Up Clipboard (opening it
-  would replace the page). Placement (`document::place`): each paste moves
+  empty window; with a page open it inserts the clipboard's picture as an
+  image mark (see Image marks; before that it toasted a pointer to Mark Up
+  Clipboard). Placement (`document::place`): each paste moves
   20 screen px further down-right (the first after Cut lands in place);
   if the centre would be outside the shown area, the marks are centred in
   it; the menu's Paste centres them on the click. Duplicate copies without
@@ -585,6 +589,53 @@ poppler-rs 0.26, cairo-rs 0.22 (feature `pdf`), edition 2024. Flatpak uses GNOME
   `restyling_several_changes_only_what_changed`, `marks_within_a_box`, and
   display-backed `multi_select`. `double_click_edits_shape_text` segfaults
   under Broadway on master too (not caused by this).
+- **Image marks** (coordinator's request for Nick, 24 Nov 2026, branch
+  `feature/image-marks`, not yet released). `Kind::Image(Picture)`: the
+  picture (a shared `ImageSurface`, compared by identity, so undo
+  snapshots and copies are cheap) stretched over the box `a`–`b`, and
+  rotated by `Shape::angle` like the other boxed marks. `Shape::image`
+  makes one at its own pixel size, shrunk to fit 80 % of the shown area
+  (`canvas::IMAGE_ROOM`) if bigger, centred on a point. Resizing keeps the
+  proportions (`document::keep_aspect`, worked out in the mark's rotated
+  frame so the opposite corner stays put); Shift stretches freely. No
+  border, fill or text; its only style is `Style::opacity` (0–1, used by
+  pictures alone, `paint_with_alpha`), set by a Picture slider and presets
+  in the Colours pop-up (`PictureOpacity`), greyed out unless a picture is
+  the selected mark (`Canvas::picture_selected`). Nick asked for it on
+  24 Nov. It isn't saved in settings, and `Shape::image` starts every new
+  picture at 1.0. The picture's own alpha is kept too. `render::draw_picture` clips to the box and paints with
+  `Filter::Good` and `Extend::Pad` (Pad left off on PDF surfaces, where
+  cairo might rasterise around it), so a saved PDF holds it as one
+  embedded image at its own resolution and everything else stays vector
+  (test `saves_image_marks_as_embedded_images`). Three ways in, all via
+  `MarkupWindow::insert_textures` → `Canvas::insert_images` (one undo step,
+  several cascade by `PASTE_STEP`, all selected, the tool switches to
+  Select): the **Insert Image** toolbar button (`win.insert-image`, after
+  the tools, custom `markup-image-symbolic` icon; multi-select
+  `GtkFileDialog`, remembers the open folder) and Insert Image… in the
+  image context menu (`win.insert-image-here`, at the click); **Ctrl+V**
+  when there are no copied marks and a page is open: a texture on the
+  clipboard, else a `GdkFileList` (files copied in Nautilus), else a toast
+  (formats checked after `union_deserialize_types`, since other apps
+  offer MIME types); **Shift+drop**. *Why Shift for drops:* on GNOME
+  Wayland the window under a drag from another app has no keyboard focus,
+  so it never sees modifier keys; mutter instead turns Shift into the
+  Move action and Ctrl into Copy. A plain drop is already Copy, so only
+  Shift can be told apart. The window's drop target accepts Copy and Move,
+  asks for Copy unless the drop's action is Move (or Shift is in the
+  event state, for X11 and focused windows), and inserts on Move
+  (`wants_insert`). Nautilus and browsers don't delete anything after a
+  Move to another app. A plain drop onto a window with a page open still
+  opens a new window, and now toasts the Shift hint. PDFs can't be
+  inserted (toast). Note that Ctrl+V after Copy Image (Ctrl+Shift+C)
+  inserts the whole page as a picture: last copy wins, as before.
+  Tests: `image_mark_size_and_place`, `image_resize_keeps_aspect_unless_free`,
+  `image_marks_share_their_picture`, `image_mark_fills_its_box_and_rotates`,
+  `copied_image_mark_picture`, and display-backed `insert_images` (run
+  alone under Broadway). **Don't open a file chooser from a Broadway test
+  run** (even under `dbus-run-session`): the portal falls back to the real
+  desktop's Nautilus, and the extra document portal it starts unmounts
+  `/run/user/1000/doc` when killed.
 - **Snap was tried and abandoned** (Nick, 11 Nov: "stick with flatpak").
   `snapcraft --destructive-mode` refuses because Nick's laptop has Ubuntu Pro
   attached, and the LXD build kept failing on the Rust plugin's rustup check.

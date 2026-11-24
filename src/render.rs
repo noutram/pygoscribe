@@ -488,7 +488,32 @@ pub fn draw_shape_on(cr: &Context, background: Background, shape: &Shape) {
                 let _ = cr.stroke();
             }
         }
+        Kind::Image(picture) => draw_picture(cr, &picture.0, &shape.bounds(), st.opacity),
     }
+    let _ = cr.restore();
+}
+
+/// Stretches `image` over `r`. In a PDF it goes in as one embedded image
+/// at its own resolution, with the marks around it still vector.
+fn draw_picture(cr: &Context, image: &ImageSurface, r: &Rect, opacity: f64) {
+    let (iw, ih) = (f64::from(image.width()), f64::from(image.height()));
+    if r.w <= 0.0 || r.h <= 0.0 || iw <= 0.0 || ih <= 0.0 {
+        return;
+    }
+    let _ = cr.save();
+    cr.rectangle(r.x, r.y, r.w, r.h);
+    cr.clip();
+    cr.translate(r.x, r.y);
+    cr.scale(r.w / iw, r.h / ih);
+    let _ = cr.set_source_surface(image, 0.0, 0.0);
+    // Pad, so the edges stay sharp rather than fading into transparency
+    // when the picture is enlarged. Not in a PDF, where the image is
+    // embedded as is and padding could make cairo rasterise around it.
+    if cr.target().type_() != cairo::SurfaceType::Pdf {
+        cr.source().set_extend(cairo::Extend::Pad);
+    }
+    cr.source().set_filter(cairo::Filter::Good);
+    let _ = cr.paint_with_alpha(opacity.clamp(0.0, 1.0));
     let _ = cr.restore();
 }
 
@@ -1093,6 +1118,57 @@ mod tests {
         // 40 × 20 plus half the border each side, give or take antialiasing.
         assert!((44..=46).contains(&t.width()) && (24..=26).contains(&t.height()), "{} × {}", t.width(), t.height());
         assert!(render_marks(&image, &[]).unwrap().is_none());
+    }
+
+    /// A solid red picture of `w` × `h` pixels.
+    fn red_picture(w: i32, h: i32) -> crate::document::Picture {
+        let img = ImageSurface::create(cairo::Format::ARgb32, w, h).unwrap();
+        {
+            let cr = Context::new(&img).unwrap();
+            cr.set_source_rgb(1.0, 0.0, 0.0);
+            cr.paint().unwrap();
+        }
+        crate::document::Picture(img)
+    }
+
+    /// A picture mark fills its box, stretched, and turns with its angle.
+    #[test]
+    fn image_mark_fills_its_box_and_rotates() {
+        let mut shape = Shape::image(red_picture(10, 5), (100.0, 50.0), (1000.0, 1000.0), black());
+        shape.a = (40.0, 30.0);
+        shape.b = (160.0, 70.0);
+        let px = draw_on_white(&shape);
+        assert_eq!(px(45, 35), (255, 0, 0));
+        assert_eq!(px(155, 65), (255, 0, 0));
+        assert_eq!(px(35, 50), (255, 255, 255), "nothing outside");
+        assert_eq!(px(100, 75), (255, 255, 255));
+        // Upright: now 40 wide and 120 tall about the same centre.
+        shape.angle = std::f64::consts::FRAC_PI_2;
+        let px = draw_on_white(&shape);
+        assert_eq!(px(45, 50), (255, 255, 255));
+        assert_eq!(px(100, 5), (255, 0, 0));
+    }
+
+    /// A picture mark's opacity lets the page show through.
+    #[test]
+    fn image_mark_opacity() {
+        let mut shape = Shape::image(red_picture(10, 10), (100.0, 50.0), (1000.0, 1000.0), black());
+        assert_eq!(shape.style.opacity, 1.0);
+        shape.style.opacity = 0.5;
+        let (r, g, b) = draw_on_white(&shape)(100, 50);
+        assert_eq!(r, 255);
+        assert!((120..=135).contains(&g) && g == b, "half red on white: {g}");
+    }
+
+    /// Copying a picture mark gives a picture of its size.
+    #[test]
+    fn copied_image_mark_picture() {
+        let image = ImageSurface::create(cairo::Format::ARgb32, 200, 200).unwrap();
+        let mut shape = Shape::image(red_picture(10, 10), (0.0, 0.0), (100.0, 100.0), black());
+        shape.a = (20.0, 20.0);
+        shape.b = (80.0, 50.0);
+        let t = render_marks(&image, &[shape]).unwrap().unwrap();
+        assert_eq!((t.width(), t.height()), (60, 30));
     }
 
     /// Line text sits above or below, and reads upright either way round.

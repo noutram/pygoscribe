@@ -68,6 +68,9 @@ const ARROW_STEP: f64 = 40.0;
 /// How far (screen pixels, down and right) each paste or duplicate is
 /// moved from the marks it copies, so it doesn't hide exactly on top.
 const PASTE_STEP: f64 = 20.0;
+/// The most of the shown page, across and down, an inserted picture takes
+/// at first (a smaller one keeps its own size).
+const IMAGE_ROOM: f64 = 0.8;
 /// Sharp PDF rendering is skipped past this many device pixels a side.
 const HIRES_MAX: i32 = 8192;
 /// The largest side Scale Image to Visible Size will make, in pixels.
@@ -410,6 +413,18 @@ impl Canvas {
     /// Moves the selected mark to the top (`front`) or bottom of the stack,
     /// as one undo step.
     pub fn restack_selected(&self, front: bool) {
+        self.reorder_selected(|doc, sel| doc.restack_many(sel, front));
+    }
+
+    /// Moves the selected marks one place up (`up`, Bring Forward) or down
+    /// (Send Backward) the stack, as one undo step.
+    pub fn step_selected(&self, up: bool) {
+        self.reorder_selected(|doc, sel| doc.step_many(sel, up));
+    }
+
+    /// Reorders the selected marks with `f`, which returns their new
+    /// indices, as one undo step, keeping them selected.
+    fn reorder_selected(&self, f: impl FnOnce(&mut Document, &[usize]) -> Vec<usize>) {
         self.finish_edit(false);
         {
             let mut st = self.st();
@@ -418,7 +433,10 @@ impl Canvas {
                 return;
             }
             let before = st.doc.clone();
-            let moved = st.doc.restack_many(&sel, front);
+            let moved = f(&mut st.doc, &sel);
+            if st.doc == before {
+                return; // nothing moved: no undo step
+            }
             select_many(&mut st, moved);
             // Split the borrow: record needs `history` mutably and `doc`
             // immutably at the same time.
@@ -603,6 +621,13 @@ impl Canvas {
             Some(shape) => shape.kind.has_optional_border(),
             None => st.tool == Tool::Select || st.tool.has_optional_border(),
         }
+    }
+
+    /// Whether the selected mark is a picture (the Picture opacity control
+    /// applies).
+    pub fn picture_selected(&self) -> bool {
+        let st = self.st();
+        st.selected.and_then(|i| st.doc.shapes.get(i)).is_some_and(|s| matches!(s.kind, Kind::Image(_)))
     }
 
     /// Which kind of mark the Line Start and Line End controls apply to:
@@ -845,6 +870,49 @@ impl Canvas {
             document::place(&shapes, placement)
         };
         self.add_marks(copies);
+    }
+
+    /// Inserts `textures` as picture marks, as one undo step, and selects
+    /// them. The first is centred on `at` (canvas coordinates), or with
+    /// `at_menu` where the context menu was opened; otherwise, or if that is
+    /// off the page, in the middle of what is shown. Each further one is a
+    /// step down and right. Each keeps its own size in pixels, or is made
+    /// smaller to fit in most of the view. Returns false if no page is open.
+    pub fn insert_images(&self, textures: &[gdk::Texture], at: Option<Point>, at_menu: bool) -> bool {
+        let mut surfaces = Vec::new();
+        for t in textures {
+            match render::surface_from_texture(t) {
+                Ok(s) => surfaces.push(s),
+                Err(e) => self.hint(&format!("Could not read the picture: {e}")),
+            }
+        }
+        let shapes: Vec<Shape> = {
+            let st = self.0.state.borrow();
+            if st.image.is_none() {
+                return false;
+            }
+            let shown = shown_rect(&st);
+            let middle = (shown.x + shown.w / 2.0, shown.y + shown.h / 2.0);
+            let wanted = if at_menu {
+                st.menu_point
+            } else {
+                at.map(|(x, y)| ((x - st.offset.0) / st.scale, (y - st.offset.1) / st.scale))
+            };
+            let centre = wanted.filter(|p| shown.contains(*p, 0.0)).unwrap_or(middle);
+            let room = (shown.w * IMAGE_ROOM, shown.h * IMAGE_ROOM);
+            let step = PASTE_STEP / st.scale;
+            surfaces
+                .into_iter()
+                .enumerate()
+                .map(|(i, surface)| {
+                    let d = step * i as f64;
+                    let c = (centre.0 + d, centre.1 + d);
+                    Shape::image(crate::document::Picture(surface), c, room, st.style.clone())
+                })
+                .collect()
+        };
+        self.add_marks(shapes);
+        true
     }
 
     /// Puts `shapes` on top of the page as one undo step and selects them.
@@ -1859,7 +1927,7 @@ impl Canvas {
                     }
                     _ => p,
                 };
-                doc.shapes[idx].resize_from(orig, handle, p);
+                doc.shapes[idx].resize_from(orig, handle, p, mods.contains(gdk::ModifierType::SHIFT_MASK));
                 render::fit_text(&mut doc.shapes[idx]);
             }
             Drag::Rotate { idx, orig, center, start, .. } => {
@@ -2675,6 +2743,51 @@ mod tests {
         assert!(!c.can_paste());
         assert!(!c.paste(false));
         assert_eq!(c.document().shapes.len(), 4);
+    }
+
+    /// Inserting pictures: centred in view (or at a point, or the menu's),
+    /// shrunk to fit, cascaded, selected, one undo step; then copied and
+    /// pasted like any mark. Run alone under Broadway (see the module docs).
+    #[test]
+    #[ignore]
+    fn insert_images() {
+        gtk::init().unwrap();
+        let image = ImageSurface::create(cairo::Format::ARgb32, 400, 200).unwrap();
+        let c = Canvas::new();
+        let texture = |w: i32, h: i32| {
+            render::texture_from_surface(ImageSurface::create(cairo::Format::ARgb32, w, h).unwrap()).unwrap()
+        };
+        assert!(!c.insert_images(&[texture(10, 10)], None, false), "no page open");
+        c.swap_page(image, PageState::default());
+        assert!(c.insert_images(&[texture(40, 20), texture(1000, 100)], None, false));
+        let shapes = c.document().shapes;
+        assert_eq!(shapes.len(), 2);
+        assert_eq!(shapes[0].bounds(), Rect { x: 180.0, y: 90.0, w: 40.0, h: 20.0 }, "own size, centred");
+        // 80 % of the 400 px page across, proportions kept, one step on.
+        let r = shapes[1].bounds();
+        assert_eq!((r.w, r.h), (320.0, 32.0));
+        assert_eq!(shapes[1].center(), (200.0 + PASTE_STEP, 100.0 + PASTE_STEP));
+        assert_eq!(selection(&c.st()), vec![0, 1], "both selected");
+        c.undo();
+        assert!(c.document().shapes.is_empty(), "one undo step");
+
+        // At a point on the canvas, or where the context menu was opened.
+        c.zoom_to(1.0, None);
+        let (ox, oy) = c.st().offset;
+        assert!(c.insert_images(&[texture(10, 10)], Some((50.0 + ox, 60.0 + oy)), false));
+        assert_eq!(c.document().shapes[0].center(), (50.0, 60.0));
+        c.st().menu_point = Some((300.0, 150.0));
+        assert!(c.insert_images(&[texture(10, 10)], None, true));
+        assert_eq!(c.document().shapes[1].center(), (300.0, 150.0));
+
+        // Copy and paste keep it a picture.
+        c.st().selected = Some(1);
+        c.st().also.clear();
+        assert!(c.copy_selected(false));
+        assert!(c.paste(false));
+        let doc = c.document();
+        assert!(matches!(doc.shapes[2].kind, Kind::Image(_)));
+        assert_eq!(doc.shapes[2].kind, doc.shapes[1].kind, "the same picture");
     }
 
     /// Several marks: Shift+click adds and removes, a marquee takes what

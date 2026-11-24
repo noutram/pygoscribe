@@ -307,6 +307,9 @@ pub struct Style {
     pub start: LineEnd,
     /// What is drawn where it ends.
     pub end: LineEnd,
+    /// How opaque a picture mark is, 0–1 (other marks use their colours'
+    /// own alpha instead).
+    pub opacity: f64,
 }
 
 /// GNOME red, 4 px solid lines, 28 px Sans, border on and no fill.
@@ -322,6 +325,7 @@ impl Default for Style {
             line: LineStyle::Solid,
             start: LineEnd::None,
             end: LineEnd::None,
+            opacity: 1.0,
         }
     }
 }
@@ -354,6 +358,9 @@ impl Shape {
         }
         if old.line != new.line {
             st.line = new.line;
+        }
+        if old.opacity != new.opacity {
+            st.opacity = new.opacity;
         }
         if EndsFor::of_kind(&self.kind).is_some() {
             if old.start != new.start {
@@ -392,6 +399,9 @@ pub enum Kind {
     /// A circular magnifier over the box `a`–`b` (kept square), enlarging
     /// the page under it `zoom` times.
     Loupe { zoom: f64 },
+    /// A picture stretched over the box `a`–`b` (inserted from a file, the
+    /// clipboard or a drop).
+    Image(Picture),
 }
 
 impl Kind {
@@ -631,7 +641,7 @@ impl Shape {
 
     /// Whether the mark keeps its rotation in `angle` (rather than in its points).
     fn uses_angle(&self) -> bool {
-        matches!(self.kind, Kind::Rect | Kind::Oval | Kind::Bubble | Kind::Text(_))
+        matches!(self.kind, Kind::Rect | Kind::Oval | Kind::Bubble | Kind::Text(_) | Kind::Image(_))
     }
 
     /// The centre of [`Self::bounds`], the pivot for rotation.
@@ -769,8 +779,9 @@ impl Shape {
     ///
     /// Handles are numbered as [`Self::handles`] returns them: 0 and 1 are a
     /// line's ends; 0–3 are a box's corners clockwise from top-left. The
-    /// corner opposite the dragged one (`idx + 2`) stays fixed.
-    pub fn resize_from(&mut self, orig: &Shape, idx: usize, p: Point) {
+    /// corner opposite the dragged one (`idx + 2`) stays fixed. A picture
+    /// keeps its proportions unless `free` (Shift held).
+    pub fn resize_from(&mut self, orig: &Shape, idx: usize, p: Point, free: bool) {
         *self = orig.clone();
         if orig.is_segment() {
             if idx == 0 { self.a = p } else { self.b = p }
@@ -779,6 +790,7 @@ impl Shape {
         let r = orig.bounds();
         let corners = r.corners();
         let fixed = corners[(idx + 2) % 4];
+        let p = if matches!(orig.kind, Kind::Image(_)) && !free { keep_aspect(orig, idx, p) } else { p };
         // A rotated box is resized in its own frame, keeping the opposite
         // corner where it is on screen.
         let (fixed, p) = if orig.angle != 0.0 {
@@ -831,6 +843,50 @@ impl Shape {
                 self.b = (nr.x + nr.w, nr.y + nr.h);
             }
         }
+    }
+}
+
+/// Where to put the pointer `p`, dragging corner `idx` of `orig`, so the
+/// box keeps `orig`'s proportions: the larger of the two stretches wins,
+/// measured in the box's own (rotated) frame from the opposite corner.
+fn keep_aspect(orig: &Shape, idx: usize, p: Point) -> Point {
+    let r = orig.bounds();
+    if r.w <= 0.0 || r.h <= 0.0 {
+        return p;
+    }
+    let corners = r.corners();
+    let c = orig.center();
+    let fixed = rotate_point(corners[(idx + 2) % 4], c, orig.angle);
+    let dragged = rotate_point(corners[idx % 4], c, orig.angle);
+    // Both in the box's frame, relative to the fixed corner.
+    let local = |q: Point| {
+        let q = rotate_point(q, fixed, -orig.angle);
+        (q.0 - fixed.0, q.1 - fixed.1)
+    };
+    let (dx, dy) = local(p);
+    let (ox, oy) = local(dragged);
+    let k = (dx.abs() / r.w).max(dy.abs() / r.h);
+    // Grow toward the pointer; on an axis it hasn't left, the way the
+    // corner already was.
+    let sign = |d: f64, o: f64| if d != 0.0 { d.signum() } else { o.signum() };
+    let q = (fixed.0 + r.w * k * sign(dx, ox), fixed.1 + r.h * k * sign(dy, oy));
+    rotate_point(q, fixed, orig.angle)
+}
+
+impl Shape {
+    /// A picture mark showing `picture` centred on `centre`, at its own
+    /// size in pixels, or smaller to fit in `room` (width, height),
+    /// keeping its proportions.
+    /// It starts fully opaque, whatever opacity the last picture had.
+    pub fn image(picture: Picture, centre: Point, room: (f64, f64), style: Style) -> Self {
+        let style = Style { opacity: 1.0, ..style };
+        let (w, h) = (f64::from(picture.0.width()).max(1.0), f64::from(picture.0.height()).max(1.0));
+        // No room known (nothing laid out yet): its own size.
+        let k = if room.0 > 0.0 && room.1 > 0.0 { (room.0 / w).min(room.1 / h).min(1.0) } else { 1.0 };
+        let (w, h) = (w * k, h * k);
+        let mut s = Shape::new(Kind::Image(picture), (centre.0 - w / 2.0, centre.1 - h / 2.0), style);
+        s.b = (centre.0 + w / 2.0, centre.1 + h / 2.0);
+        s
     }
 }
 
@@ -902,6 +958,28 @@ impl Document {
             self.shapes = moved;
             (0..n).collect()
         }
+    }
+
+    /// Moves the marks at `indices` one place up (`up`) or down the stack:
+    /// each swaps with the nearest mark above (below) it that isn't moving.
+    /// Marks already at the top (bottom), or held there by moving marks
+    /// above (below) them, stay. Returns their new indices, ascending.
+    pub fn step_many(&mut self, indices: &[usize], up: bool) -> Vec<usize> {
+        let n = self.shapes.len();
+        let mut moving = vec![false; n];
+        for &i in indices.iter().filter(|&&i| i < n) {
+            moving[i] = true;
+        }
+        // Walk from the end it moves toward, so a block moves together.
+        let order: Vec<usize> = if up { (0..n).rev().collect() } else { (0..n).collect() };
+        for i in order {
+            let j = if up { i + 1 } else { i.wrapping_sub(1) };
+            if moving[i] && j < n && !moving[j] {
+                self.shapes.swap(i, j);
+                moving.swap(i, j);
+            }
+        }
+        (0..n).filter(|&i| moving[i]).collect()
     }
 
     /// Indices of the marks whose drawn box lies inside `r`.
@@ -1073,7 +1151,7 @@ mod tests {
         let mut s = Shape::new(Kind::Rect, (10.0, 10.0), Style::default());
         s.b = (50.0, 30.0);
         let orig = s.clone();
-        s.resize_from(&orig, 2, (70.0, 60.0));
+        s.resize_from(&orig, 2, (70.0, 60.0), false);
         assert_eq!(s.bounds(), Rect { x: 10.0, y: 10.0, w: 60.0, h: 50.0 });
     }
 
@@ -1141,7 +1219,7 @@ mod tests {
         let orig = s.clone();
         let fixed = orig.outline()[0];
         let dragged = orig.outline()[2];
-        s.resize_from(&orig, 2, (dragged.0 + 30.0, dragged.1 + 10.0));
+        s.resize_from(&orig, 2, (dragged.0 + 30.0, dragged.1 + 10.0), false);
         assert!(close(s.outline()[0], fixed));
         assert!((s.angle - 0.7).abs() < 1e-9);
     }
@@ -1360,6 +1438,23 @@ mod tests {
         assert_eq!(line.style.end, LineEnd::Arrow);
     }
 
+    /// Bring Forward and Send Backward move marks one place; a block
+    /// moves together and marks at the end stay.
+    #[test]
+    fn stepping_marks_up_and_down() {
+        let mark = |x: f64| Shape::new(Kind::Rect, (x, 0.0), Style::default());
+        let mut doc = Document { shapes: (0..5).map(|i| mark(f64::from(i))).collect(), ..Default::default() };
+        let xs = |d: &Document| d.shapes.iter().map(|s| s.a.0).collect::<Vec<f64>>();
+        assert_eq!(doc.step_many(&[1], true), vec![2]);
+        assert_eq!(xs(&doc), [0.0, 2.0, 1.0, 3.0, 4.0]);
+        assert_eq!(doc.step_many(&[2, 3], true), vec![3, 4]);
+        assert_eq!(xs(&doc), [0.0, 2.0, 4.0, 1.0, 3.0]);
+        assert_eq!(doc.step_many(&[3, 4], true), vec![3, 4], "already on top");
+        assert_eq!(doc.step_many(&[0, 3], false), vec![0, 2]);
+        assert_eq!(xs(&doc), [0.0, 2.0, 1.0, 4.0, 3.0]);
+        assert_eq!(doc.step_many(&[9], true), Vec::<usize>::new());
+    }
+
     /// A marquee takes the marks wholly inside it.
     #[test]
     fn marks_within_a_box() {
@@ -1370,5 +1465,56 @@ mod tests {
         let doc = Document { shapes: vec![a, b], ..Default::default() };
         assert_eq!(doc.marks_within(&Rect { x: 0.0, y: 0.0, w: 30.0, h: 30.0 }), vec![0]);
         assert_eq!(doc.marks_within(&Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }), vec![0, 1]);
+    }
+
+    /// A picture of `w` × `h` pixels.
+    fn picture(w: i32, h: i32) -> Picture {
+        Picture(gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, w, h).unwrap())
+    }
+
+    /// A picture mark is centred where asked, at its own size if it fits,
+    /// otherwise shrunk to fit with its proportions kept.
+    #[test]
+    fn image_mark_size_and_place() {
+        let s = Shape::image(picture(200, 100), (500.0, 500.0), (1000.0, 1000.0), Style::default());
+        assert_eq!(s.bounds(), Rect { x: 400.0, y: 450.0, w: 200.0, h: 100.0 });
+        let s = Shape::image(picture(200, 100), (50.0, 50.0), (100.0, 100.0), Style::default());
+        assert_eq!(s.bounds(), Rect { x: 0.0, y: 25.0, w: 100.0, h: 50.0 });
+        assert!(s.can_rotate() && !s.holds_text() && !s.is_segment());
+    }
+
+    /// Dragging a picture's corner keeps its proportions, rotated too;
+    /// Shift (`free`) stretches it. The opposite corner stays put.
+    #[test]
+    fn image_resize_keeps_aspect_unless_free() {
+        let mut s = Shape::image(picture(200, 100), (100.0, 50.0), (1000.0, 1000.0), Style::default());
+        let orig = s.clone();
+        s.resize_from(&orig, 2, (300.0, 120.0), false);
+        assert_eq!(s.bounds(), Rect { x: 0.0, y: 0.0, w: 300.0, h: 150.0 });
+        s.resize_from(&orig, 2, (300.0, 120.0), true);
+        assert_eq!(s.bounds(), Rect { x: 0.0, y: 0.0, w: 300.0, h: 120.0 });
+        // Dragging the top-left corner up and left grows it that way.
+        s.resize_from(&orig, 0, (-100.0, -10.0), false);
+        assert_eq!(s.bounds(), Rect { x: -100.0, y: -50.0, w: 300.0, h: 150.0 });
+
+        let mut s = orig.clone();
+        s.angle = 0.7;
+        let turned = s.clone();
+        let fixed = turned.outline()[0];
+        let target = rotate_point((fixed.0 + 400.0, fixed.1 + 150.0), fixed, 0.7);
+        s.resize_from(&turned, 2, target, false);
+        let r = s.bounds();
+        assert!((r.w / r.h - 2.0).abs() < 1e-9, "{r:?}");
+        assert!((r.w - 400.0).abs() < 1e-9, "{r:?}");
+        assert!(close(s.outline()[0], fixed), "opposite corner stays");
+    }
+
+    /// Picture marks are copied by reference: a copy is the same picture.
+    #[test]
+    fn image_marks_share_their_picture() {
+        let s = Shape::image(picture(10, 10), (5.0, 5.0), (100.0, 100.0), Style::default());
+        let copies = place(std::slice::from_ref(&s), Placement::At((50.0, 50.0)));
+        assert_eq!(copies[0].kind, s.kind);
+        assert_eq!(copies[0].bounds(), Rect { x: 45.0, y: 45.0, w: 10.0, h: 10.0 });
     }
 }

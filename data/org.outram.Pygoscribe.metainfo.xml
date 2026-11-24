@@ -36,6 +36,11 @@
   </replaces>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.1.25" date="2026-11-24">
+      <description>
+        <p>Put pictures on the page as image marks: from Insert Image in the tool bar, by pasting with Ctrl+V, or by holding Shift while dropping one. They move, resize, rotate, copy and fade like other marks, and Save as PDF keeps the rest of the page vector. Cut, copy, paste and duplicate marks, select several at once, and move marks one step forward or backward.</p>
+      </description>
+    </release>
     <release version="0.1.24" date="2026-11-22">
       <description>
         <p>Put an end on either end of a drawing, line or arrow: arrow, open arrow, swept arrow, dot, circle, square, diamond or bar. Hold Shift while drawing a line or arrow, dragging one of its ends or rotating it to snap to 15° steps, so level and upright lines come out exact. The tool bar is grouped more compactly.</p>

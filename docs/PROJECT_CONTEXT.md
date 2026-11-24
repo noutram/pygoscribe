@@ -51,6 +51,7 @@ All four planned steps are done.
 | 0.1.22 | Select several pages in the sidebar (Ctrl/Shift+click, Ctrl+A) and delete them together, with one Undo | Released 20 Nov (`v0.1.22`) |
 | 0.1.23 | Line style (solid, dashed, dotted, dash dot, dash dot dot, long dash) for drawing, lines, arrows and shape borders | Released 20 Nov (`v0.1.23`) |
 | 0.1.24 | Line ends (arrow, open arrow, swept arrow, dot, circle, square, diamond, bar) at either end of drawings, lines and arrows; grouped toolbar; Shift snaps lines and arrows to 15° while drawing, dragging an end or rotating | Released 22 Nov (`v0.1.24`) |
+| 0.1.25 | Cut, copy, paste and duplicate marks; select several marks; image marks (Insert Image, Ctrl+V, Shift+drop) with opacity; Bring Forward / Send Backward | Released 24 Nov (`v0.1.25`) |
 
 ## Architecture
 
@@ -539,7 +540,7 @@ poppler-rs 0.26, cairo-rs 0.22 (feature `pdf`), edition 2024. Flatpak uses GNOME
   under it (`ColourControl::presets`). Only the colour and font dialogs
   open from the pop-ups, and those are dialogs, not popovers.
 - **Cut, copy, paste and duplicate marks** (Nick's request 23 Nov 2026,
-  branch `feature/copy-paste-marks`, not yet released). Ctrl+X/C/V/D and
+  branch `feature/copy-paste-marks`, released in 0.1.25). Ctrl+X/C/V/D and
   the mark context menu (Cut, Copy, Paste, Duplicate; the image menu gets
   Paste at the click). Works for every mark kind and for several selected
   marks (see the next item). **The clipboard scheme** (module comment in `src/clip.rs`):
@@ -590,7 +591,7 @@ poppler-rs 0.26, cairo-rs 0.22 (feature `pdf`), edition 2024. Flatpak uses GNOME
   display-backed `multi_select`. `double_click_edits_shape_text` segfaults
   under Broadway on master too (not caused by this).
 - **Image marks** (coordinator's request for Nick, 24 Nov 2026, branch
-  `feature/image-marks`, not yet released). `Kind::Image(Picture)`: the
+  `feature/image-marks`, released in 0.1.25). `Kind::Image(Picture)`: the
   picture (a shared `ImageSurface`, compared by identity, so undo
   snapshots and copies are cheap) stretched over the box `a`–`b`, and
   rotated by `Shape::angle` like the other boxed marks. `Shape::image`

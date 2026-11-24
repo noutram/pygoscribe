@@ -3,7 +3,7 @@
 
 [package]
 name = "pygoscribe"
-version = "0.1.24"
+version = "0.1.25"
 description = "Mark up images from the clipboard or a file"
 edition = "2024"
 license = "GPL-3.0-only"
